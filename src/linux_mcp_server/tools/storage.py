@@ -13,6 +13,7 @@ from pydantic.functional_validators import BeforeValidator
 from linux_mcp_server.audit import log_tool_call
 from linux_mcp_server.commands import CommandSpec
 from linux_mcp_server.commands import get_command
+from linux_mcp_server.compatibility import parse_lsblk_pairs
 from linux_mcp_server.config import CONFIG
 from linux_mcp_server.models import BlockDevices
 from linux_mcp_server.models import NodeEntry
@@ -93,12 +94,14 @@ async def list_block_devices(
     name, size, type, mount point, and filesystem information.
     """
     cmd = get_command("list_block_devices")
-    returncode, stdout, stderr = await cmd.run(host=host)
+    returncode, stdout, stderr, variant = await cmd.run_with_variant(host=host)
 
     if not is_successful_output(returncode, stdout):
         raise ToolError(f"Unable to list block devices. lsblk command may not be available. {returncode}: {stderr}")
 
-    return BlockDevices.model_validate_json(stdout)
+    if variant in {"primary", "native_json"}:
+        return BlockDevices.model_validate_json(stdout)
+    return parse_lsblk_pairs(stdout, require_parent_fields=variant == "centos7_pairs_parent")
 
 
 @mcp.tool(

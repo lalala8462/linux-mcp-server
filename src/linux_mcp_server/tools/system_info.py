@@ -8,6 +8,7 @@ from mcp.types import ToolAnnotations
 from linux_mcp_server.audit import log_tool_call
 from linux_mcp_server.commands import get_command
 from linux_mcp_server.commands import get_command_group
+from linux_mcp_server.compatibility import parse_findmnt_pairs
 from linux_mcp_server.models import CpuInfo
 from linux_mcp_server.models import DiskUsage
 from linux_mcp_server.models import SystemInfo
@@ -126,7 +127,7 @@ async def get_disk_usage(
     cmd = get_command("disk_usage")
 
     try:
-        returncode, stdout, stderr = await cmd.run(host=host)
+        returncode, stdout, stderr, variant = await cmd.run_with_variant(host=host)
     except Exception as e:
         raise ToolError(f"Error gathering disk usage information: {str(e)}") from e
 
@@ -134,8 +135,10 @@ async def get_disk_usage(
         raise ToolError(f"Unable to retrieve disk usage information: {stderr}")
 
     try:
-        data = json.loads(stdout)
-        return DiskUsage.model_validate(data)
+        if variant in {"primary", "native_json"}:
+            data = json.loads(stdout)
+            return DiskUsage.model_validate(data)
+        return parse_findmnt_pairs(stdout)
     except (json.JSONDecodeError, ValueError) as e:
         raise ToolError(f"Error parsing disk usage information: {str(e)}") from e
 

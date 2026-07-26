@@ -50,12 +50,16 @@ async def test_list_block_devices_command_failure(side_effect, expected_match, m
         await mcp_client.call_tool("list_block_devices", {})
 
 
-async def test_list_block_devices_remote_execution(mock_execute_with_fallback, mcp_client):
-    mock_execute_with_fallback.return_value = (0, "NAME   SIZE TYPE\nsda    1TB  disk", "")
-    mock_execute_with_fallback.return_value = (
+async def test_list_block_devices_remote_execution(mocker, mcp_client):
+    mock_execute_compatible = mocker.patch(
+        "linux_mcp_server.commands.execute_compatible_command",
+        autospec=True,
+    )
+    mock_execute_compatible.return_value = (
         0,
         '{"blockdevices":[{"name":"sda","size":"1TB","type":"disk","mountpoint":null,"fstype":null,"model":null,"children":[]}]}',
         "",
+        "native_json",
     )
 
     result = await mcp_client.call_tool("list_block_devices", {"host": "remote.host.com"})
@@ -63,6 +67,24 @@ async def test_list_block_devices_remote_execution(mock_execute_with_fallback, m
 
     assert "sda" in device_names
 
-    mock_execute_with_fallback.assert_called_once()
-    call_kwargs = mock_execute_with_fallback.call_args[1]
+    mock_execute_compatible.assert_called_once()
+    call_kwargs = mock_execute_compatible.call_args[1]
     assert call_kwargs["host"] == "remote.host.com"
+
+
+async def test_list_block_devices_remote_centos7_pairs(mocker, mcp_client):
+    mock_execute = mocker.patch(
+        "linux_mcp_server.commands.execute_compatible_command",
+        autospec=True,
+        return_value=(
+            0,
+            'NAME="sda" SIZE="1TB" TYPE="disk" MOUNTPOINT="/" FSTYPE="xfs" MODEL=""',
+            "",
+            "centos7_pairs_flat",
+        ),
+    )
+
+    result = await mcp_client.call_tool("list_block_devices", {"host": "remote.host.com"})
+
+    assert result.structured_content["blockdevices"][0]["name"] == "sda"
+    mock_execute.assert_called_once()

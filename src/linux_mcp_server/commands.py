@@ -11,6 +11,8 @@ from types import MappingProxyType
 from pydantic import BaseModel
 from pydantic import ConfigDict
 
+from linux_mcp_server.compatibility import COMPATIBILITY_COMMANDS
+from linux_mcp_server.connection.ssh import execute_compatible_command
 from linux_mcp_server.connection.ssh import execute_with_fallback
 
 
@@ -20,6 +22,7 @@ class CommandSpec(BaseModel):
     Attributes:
         args: Command arguments as a tuple of strings.
         fallback: Alternative command arguments if primary fails.
+        compatibility_key: Fixed remote capability profile to use.
         optional_flags: Maps parameter names to flag arguments that are added
             when the parameter is truthy. For example:
             {"unit": ["--unit", "{unit}"]} adds "--unit <value>" when unit is provided.
@@ -29,24 +32,41 @@ class CommandSpec(BaseModel):
 
     args: tuple[str, ...]
     fallback: tuple[str, ...] | None = None
+    compatibility_key: str | None = None
     optional_flags: Mapping[str, tuple[str, ...]] | None = None
 
-    async def run(self, host: str | None = None, **kwargs: object) -> tuple[int, str, str]:
-        """Run the command with optional fallback.
-
-        Args:
-            host: Optional remote host address.
-            **kwargs: Additional arguments passed to substitute_command_args.
-        """
+    def _render_args(self, **kwargs: object) -> tuple[str, ...]:
         args = list(substitute_command_args(self.args, **kwargs))
         if self.optional_flags:
             for param_name, flag_args in self.optional_flags.items():
                 if kwargs.get(param_name):
                     args.extend(substitute_command_args(flag_args, **kwargs))
+        return tuple(args)
 
-        returncode, stdout, stderr = await execute_with_fallback(tuple(args), fallback=self.fallback, host=host)
+    async def run_with_variant(
+        self,
+        host: str | None = None,
+        **kwargs: object,
+    ) -> tuple[int, str, str, str]:
+        """Run a command and return the selected compatibility variant."""
+
+        args = self._render_args(**kwargs)
+        if host and self.compatibility_key:
+            returncode, stdout, stderr, variant = await execute_compatible_command(
+                self.compatibility_key,
+                host=host,
+            )
+        else:
+            returncode, stdout, stderr = await execute_with_fallback(args, fallback=self.fallback, host=host)
+            variant = "primary"
         stdout = stdout if isinstance(stdout, str) else stdout.decode("utf-8", errors="replace")
         stderr = stderr if isinstance(stderr, str) else stderr.decode("utf-8", errors="replace")
+        return returncode, stdout, stderr, variant
+
+    async def run(self, host: str | None = None, **kwargs: object) -> tuple[int, str, str]:
+        """Run the command with optional fallback."""
+
+        returncode, stdout, stderr, _ = await self.run_with_variant(host=host, **kwargs)
         return returncode, stdout, stderr
 
     async def run_bytes(self, host: str | None = None, **kwargs: object) -> tuple[int, bytes, bytes]:
@@ -56,15 +76,21 @@ class CommandSpec(BaseModel):
             host: Optional remote host address.
             **kwargs: Additional arguments passed to substitute_command_args.
         """
-        args = list(substitute_command_args(self.args, **kwargs))
-        if self.optional_flags:
-            for param_name, flag_args in self.optional_flags.items():
-                if kwargs.get(param_name):
-                    args.extend(substitute_command_args(flag_args, **kwargs))
+        args = self._render_args(**kwargs)
 
-        returncode, stdout, stderr = await execute_with_fallback(
-            tuple(args), fallback=self.fallback, host=host, encoding=None
-        )
+        if host and self.compatibility_key:
+            returncode, stdout, stderr, _ = await execute_compatible_command(
+                self.compatibility_key,
+                host=host,
+                encoding=None,
+            )
+        else:
+            returncode, stdout, stderr = await execute_with_fallback(
+                args,
+                fallback=self.fallback,
+                host=host,
+                encoding=None,
+            )
         stdout = stdout if isinstance(stdout, bytes) else stdout.encode("utf-8")
         stderr = stderr if isinstance(stderr, bytes) else stderr.encode("utf-8")
         return returncode, stdout, stderr
@@ -172,19 +198,16 @@ COMMANDS: Mapping[str, CommandGroup] = MappingProxyType(
         "list_block_devices": CommandGroup(
             commands={
                 "default": CommandSpec(
-                    args=(
-                        "lsblk",
-                        "-o",
-                        "NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE,MODEL",
-                        "--json",
-                    )
+                    args=COMPATIBILITY_COMMANDS["block_devices"][0].args,
+                    compatibility_key="block_devices",
                 ),
             }
         ),
         "disk_usage": CommandGroup(
             commands={
                 "default": CommandSpec(
-                    args=("findmnt", "--df", "--json"),
+                    args=COMPATIBILITY_COMMANDS["disk_usage"][0].args,
+                    compatibility_key="disk_usage",
                 ),
             }
         ),
@@ -261,7 +284,10 @@ COMMANDS: Mapping[str, CommandGroup] = MappingProxyType(
         ),
         "memory_info": CommandGroup(
             commands={
-                "free": CommandSpec(args=("free", "-b", "-w")),
+                "free": CommandSpec(
+                    args=COMPATIBILITY_COMMANDS["memory_info"][0].args,
+                    compatibility_key="memory_info",
+                ),
             }
         ),
         "hardware_info": CommandGroup(

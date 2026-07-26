@@ -7,6 +7,7 @@ import pytest
 
 from asyncssh import SSHClientConnection
 
+from linux_mcp_server.compatibility import HostCompatibility
 from linux_mcp_server.connection.ssh import _execute_local
 from linux_mcp_server.connection.ssh import SSHConnectionManager
 
@@ -37,6 +38,27 @@ def ssh_manager():
     manager = SSHConnectionManager()
     manager._connections.clear()
     return manager
+
+
+@pytest.fixture(autouse=True)
+def mock_compatibility_probe(mocker):
+    return mocker.patch.object(
+        SSHConnectionManager,
+        "_probe_compatibility",
+        autospec=True,
+        return_value=HostCompatibility(
+            host="host",
+            hostname="testhost",
+            os_id="test",
+            os_version="1",
+            kernel="1.0",
+            variants={
+                "disk_usage": "native_json",
+                "block_devices": "native_json",
+                "memory_info": "native_wide",
+            },
+        ),
+    )
 
 
 @pytest.fixture

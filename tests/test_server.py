@@ -346,6 +346,12 @@ class CaptureContext:
         self._context = get_execution_context()
         return (0, FREE_OUTPUT, "")
 
+    async def _execute_compatible(self, *_args, **_kwargs):
+        from linux_mcp_server.execution_context import get_execution_context
+
+        self._context = get_execution_context()
+        return (0, FREE_OUTPUT, "", "native_wide")
+
     def get_context(self):
         return self._context
 
@@ -355,6 +361,7 @@ class TestExecutionContextMiddlewareIntegration:
     def capture_context(self, mocker):
         capture = CaptureContext()
         mocker.patch("linux_mcp_server.commands.execute_with_fallback", side_effect=capture._execute_with_fallback)
+        mocker.patch("linux_mcp_server.commands.execute_compatible_command", side_effect=capture._execute_compatible)
         return capture
 
     async def test_stdio_without_policy_allows_all(self, mcp_client, mocker, capture_context):

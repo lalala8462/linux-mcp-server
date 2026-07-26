@@ -199,6 +199,24 @@ async def test_get_disk_usage_null_filesystem_fields(mcp_client, mock_execute):
     assert parsed["filesystems"][1]["size"] is None
 
 
+async def test_get_disk_usage_remote_centos7_pairs(mcp_client, mocker):
+    mock_execute = mocker.patch(
+        "linux_mcp_server.commands.execute_compatible_command",
+        autospec=True,
+        return_value=(
+            0,
+            'SOURCE="/dev/sda1" FSTYPE="xfs" SIZE="10G" USED="2G" AVAIL="8G" USE%="20%" TARGET="/"',
+            "",
+            "centos7_pairs",
+        ),
+    )
+
+    result = await mcp_client.call_tool("get_disk_usage", {"host": "remote.host.com"})
+
+    assert result.structured_content["filesystems"][0]["target"] == "/"
+    mock_execute.assert_called_once()
+
+
 async def test_get_hardware_information_unexpected_exception(mcp_client, mock_execute):
     """Test get_hardware_information with unexpected exception from command execution."""
     # Mock cmd.run to raise an unexpected exception (not FileNotFoundError)

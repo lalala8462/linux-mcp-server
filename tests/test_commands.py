@@ -118,3 +118,25 @@ class TestGetCommand:
         """Test that invalid subcommand raises KeyError listing available subcommands."""
         with pytest.raises(KeyError, match=r"Subcommand 'invalid' not found for 'system_info'.*Available:.*hostname"):
             get_command("system_info", "invalid")
+
+
+async def test_compatible_command_returns_remote_variant(mocker):
+    execute = mocker.patch(
+        "linux_mcp_server.commands.execute_compatible_command",
+        autospec=True,
+        return_value=(0, "pairs", "", "centos7_pairs"),
+    )
+
+    result = await get_command("disk_usage").run_with_variant(host="server.example.com")
+
+    assert result == (0, "pairs", "", "centos7_pairs")
+    execute.assert_called_once_with("disk_usage", host="server.example.com")
+
+
+async def test_compatible_command_keeps_local_primary(mock_execute_with_fallback):
+    mock_execute_with_fallback.return_value = (0, '{"filesystems": []}', "")
+
+    result = await get_command("disk_usage").run_with_variant()
+
+    assert result == (0, '{"filesystems": []}', "", "primary")
+    mock_execute_with_fallback.assert_called_once()

@@ -4,6 +4,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from linux_mcp_server.compatibility import HostCompatibility
 from linux_mcp_server.connection.ssh import SSHConnectionManager
 
 
@@ -15,10 +16,32 @@ def ssh_manager():
     return manager
 
 
+@pytest.fixture(autouse=True)
+def mock_compatibility_probe(mocker):
+    return mocker.patch.object(
+        SSHConnectionManager,
+        "_probe_compatibility",
+        autospec=True,
+        return_value=HostCompatibility(
+            host="testhost",
+            hostname="testhost",
+            os_id="test",
+            os_version="1",
+            kernel="1.0",
+            variants={
+                "disk_usage": "native_json",
+                "block_devices": "native_json",
+                "memory_info": "native_wide",
+            },
+        ),
+    )
+
+
 @pytest.fixture
 def mock_asyncssh_connect(mocker):
     """Provide a mock for asyncssh.connect that captures call arguments."""
     mock_conn = AsyncMock()
+    mock_conn.get_extra_info = Mock(return_value="testuser")
     mock_conn.is_closed = Mock(return_value=False)
 
     captured_kwargs = {}

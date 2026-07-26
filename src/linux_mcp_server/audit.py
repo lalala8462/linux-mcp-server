@@ -36,6 +36,7 @@ SENSITIVE_FIELDS = {
 
 
 class Event(StrEnum):
+    COMPAT_FALLBACK = "COMPAT_FALLBACK"
     LOCAL_EXEC_ERROR = "LOCAL_EXEC_ERROR"
     REMOTE_EXEC = "REMOTE_EXEC"
     REMOTE_EXEC_ERROR = "REMOTE_EXEC_ERROR"
@@ -328,3 +329,36 @@ def log_ssh_command(
         message += f" | duration={duration:.3f}s"
 
     logger.info(message, extra=extra)
+
+
+def log_compat_fallback(
+    *,
+    host: str,
+    hostname: str,
+    os_id: str,
+    os_version: str,
+    kernel: str,
+    package_version: str,
+    capability: str,
+    primary_variant: str,
+    selected_variant: str,
+) -> None:
+    """Log compatibility selection without recording command output."""
+
+    logger = logging.getLogger(__name__)
+    extra = {
+        "event": Event.COMPAT_FALLBACK,
+        "host": host,
+        "hostname": hostname,
+        "os_id": os_id,
+        "os_version": os_version,
+        "kernel": kernel,
+        "package_version": package_version,
+        "capability": capability,
+        "primary_variant": primary_variant,
+        "selected_variant": selected_variant,
+    }
+    logger.info(
+        f"{Event.COMPAT_FALLBACK}: {capability} | host={host} | selected_variant={selected_variant}",
+        extra=extra,
+    )

@@ -9,6 +9,9 @@
 
 A Model Context Protocol (MCP) server for read-only Linux system administration, diagnostics, and troubleshooting on RHEL-based systems.
 
+> This fork adds fixed-command compatibility for CentOS 7 while preserving the
+> upstream MCP tool schemas. See [CentOS 7 compatibility](docs/centos7-compatibility.md).
+
 
 ## Features
 

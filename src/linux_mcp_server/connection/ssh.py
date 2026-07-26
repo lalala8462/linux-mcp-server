@@ -19,16 +19,29 @@ from typing import Optional
 
 import asyncssh
 
+from linux_mcp_server import __version__
 from linux_mcp_server.audit import Event
+from linux_mcp_server.audit import log_compat_fallback
 from linux_mcp_server.audit import log_ssh_command
 from linux_mcp_server.audit import log_ssh_connect
 from linux_mcp_server.audit import Status
+from linux_mcp_server.compatibility import COMPATIBILITY_COMMANDS
+from linux_mcp_server.compatibility import HostCompatibility
+from linux_mcp_server.compatibility import parse_os_release
+from linux_mcp_server.compatibility import validate_variant_output
 from linux_mcp_server.config import CONFIG
 from linux_mcp_server.execution_context import get_execution_context
 from linux_mcp_server.utils.types import Host
 
 
 logger = logging.getLogger("linux-mcp-server")
+_UNSUPPORTED_OPTION_MARKERS = (
+    "invalid option",
+    "illegal option",
+    "unknown column",
+    "unknown option",
+    "unrecognized option",
+)
 
 
 def discover_ssh_key() -> str | None:
@@ -86,16 +99,31 @@ class SSHConnectionManager:
     """
 
     _instance: Optional["SSHConnectionManager"] = None
+    _compatibility: dict[str, HostCompatibility]
     _connections: dict[str, asyncssh.SSHClientConnection]
+    _logged_fallbacks: set[tuple[str, str]]
     _ssh_key: str | None
 
     def __new__(cls):
         """Implement singleton pattern."""
         if cls._instance is None:
             cls._instance = super().__new__(cls)
+            cls._instance._compatibility = {}
             cls._instance._connections = {}
+            cls._instance._logged_fallbacks = set()
             cls._instance._ssh_key = discover_ssh_key()
         return cls._instance
+
+    def _connection_settings(self, host: str) -> tuple[str, str | None, str]:
+        context = get_execution_context()
+        if context is not None:
+            ssh_key = str(context.ssh_key_path) if context.ssh_key_path else self._ssh_key
+            username = context.ssh_key_user or CONFIG.user
+        else:
+            ssh_key = self._ssh_key
+            username = CONFIG.user
+        key = f"{host}:{ssh_key or 'default'}:{username or 'default'}"
+        return key, ssh_key, username
 
     async def get_connection(self, host: str) -> asyncssh.SSHClientConnection:
         """
@@ -111,18 +139,7 @@ class SSHConnectionManager:
         Raises:
             ConnectionError: If connection fails
         """
-        # Get SSH credentials from ExecutionContext if available
-        context = get_execution_context()
-        if context is not None:
-            ssh_key = str(context.ssh_key_path) if context.ssh_key_path else self._ssh_key
-            username = context.ssh_key_user or CONFIG.user
-        else:
-            # No context set - use defaults
-            ssh_key = self._ssh_key
-            username = CONFIG.user
-
-        # Build pool key including SSH key and username to avoid connection reuse conflicts
-        key = f"{host}:{ssh_key or 'default'}:{username or 'default'}"
+        key, ssh_key, username = self._connection_settings(host)
 
         # Return existing connection if available
         if key in self._connections:
@@ -143,6 +160,8 @@ class SSHConnectionManager:
                 # Connection was closed, remove it
                 logger.debug(f"SSH_POOL: remove_closed_connection | connection={key}")
                 del self._connections[key]
+                self._compatibility.pop(key, None)
+                self._logged_fallbacks = {item for item in self._logged_fallbacks if item[0] != key}
 
         # Create new connection
         # DEBUG level: Log connection attempt before it completes
@@ -185,6 +204,13 @@ class SSHConnectionManager:
             # DEBUG level: Log pool state
             logger.debug(f"SSH_POOL: add_connection | connections={len(self._connections)}")
 
+            try:
+                self._compatibility[key] = await self._probe_compatibility(host, conn)
+            except Exception:
+                self._connections.pop(key, None)
+                conn.close()
+                raise
+
             return conn
 
         except asyncssh.PermissionDenied as e:
@@ -197,6 +223,127 @@ class SSHConnectionManager:
             error_msg = str(e)
             log_ssh_connect(host, status=Status.failed, error=error_msg)
             raise ConnectionError(f"Failed to connect to {host}: {e}") from e
+
+    async def _run_probe_command(
+        self,
+        host: str,
+        conn: asyncssh.SSHClientConnection,
+        command: Sequence[str],
+    ) -> tuple[int, str, str]:
+        binary = command[0]
+        if not Path(binary).is_absolute():
+            binary = await get_remote_bin_path(binary, host, conn)
+        cmd_str = shlex.join([binary, *command[1:]])
+        start_time = time.time()
+        try:
+            result = await conn.run(
+                cmd_str,
+                check=False,
+                timeout=CONFIG.command_timeout,
+                encoding="utf-8",
+            )
+        except asyncssh.TimeoutError:
+            raise ConnectionError(f"Compatibility probe timed out on {host}") from None
+        except asyncssh.Error as error:
+            raise ConnectionError(f"Compatibility probe failed on {host}: {error}") from error
+
+        return_code = result.exit_status if result.exit_status is not None else 0
+        stdout = (
+            result.stdout.decode("utf-8", errors="replace") if isinstance(result.stdout, bytes) else result.stdout or ""
+        )
+        stderr = (
+            result.stderr.decode("utf-8", errors="replace") if isinstance(result.stderr, bytes) else result.stderr or ""
+        )
+        log_ssh_command(cmd_str, host, exit_code=return_code, duration=time.time() - start_time)
+        return return_code, stdout, stderr
+
+    async def _probe_required_text(
+        self,
+        host: str,
+        conn: asyncssh.SSHClientConnection,
+        command: Sequence[str],
+        label: str,
+    ) -> str:
+        return_code, stdout, _ = await self._run_probe_command(host, conn, command)
+        if return_code != 0 or not stdout.strip():
+            raise ConnectionError(f"Compatibility probe could not read {label} on {host}")
+        return stdout.strip()
+
+    async def _probe_compatibility(
+        self,
+        host: str,
+        conn: asyncssh.SSHClientConnection,
+    ) -> HostCompatibility:
+        hostname = await self._probe_required_text(host, conn, ("hostname",), "hostname")
+        os_release = await self._probe_required_text(host, conn, ("cat", "/etc/os-release"), "os-release")
+        kernel = await self._probe_required_text(host, conn, ("uname", "-r"), "kernel")
+        os_id, os_version = parse_os_release(os_release)
+
+        selected: dict[str, str] = {}
+        for capability, variants in COMPATIBILITY_COMMANDS.items():
+            for variant in variants:
+                return_code, stdout, stderr = await self._run_probe_command(host, conn, variant.args)
+                if return_code == 0:
+                    try:
+                        validate_variant_output(capability, variant.name, stdout)
+                    except (TypeError, ValueError) as error:
+                        raise ConnectionError(
+                            f"Compatibility probe for {capability} returned malformed output on {host}"
+                        ) from error
+                    selected[capability] = variant.name
+                    break
+
+                normalized_error = stderr.casefold()
+                if any(marker in normalized_error for marker in _UNSUPPORTED_OPTION_MARKERS):
+                    continue
+                raise ConnectionError(
+                    f"Compatibility probe for {capability} failed with exit code {return_code} on {host}"
+                )
+            else:
+                raise ConnectionError(f"No compatible {capability} command was found on {host}")
+
+        return HostCompatibility(
+            host=host,
+            hostname=hostname,
+            os_id=os_id,
+            os_version=os_version,
+            kernel=kernel,
+            variants=selected,
+        )
+
+    async def get_compatibility(self, host: str) -> HostCompatibility:
+        """Return the profile collected for the current SSH identity."""
+
+        key, _, _ = self._connection_settings(host)
+        await self.get_connection(host)
+        try:
+            return self._compatibility[key]
+        except KeyError as error:
+            raise ConnectionError(f"Compatibility profile is unavailable for {host}") from error
+
+    def log_fallback(self, host: str, capability: str, profile: HostCompatibility) -> None:
+        """Write one fallback event per capability and SSH connection."""
+
+        key, _, _ = self._connection_settings(host)
+        log_key = (key, capability)
+        if log_key in self._logged_fallbacks:
+            return
+        variants = COMPATIBILITY_COMMANDS[capability]
+        selected_variant = profile.variants[capability]
+        if selected_variant == variants[0].name:
+            return
+        log_compat_fallback(
+            host=host,
+            hostname=profile.hostname,
+            os_id=profile.os_id,
+            os_version=profile.os_version,
+            kernel=profile.kernel,
+            package_version=__version__,
+            capability=capability,
+            primary_variant=variants[0].name,
+            selected_variant=selected_variant,
+        )
+        self._logged_fallbacks.add(log_key)
 
     async def execute_remote(
         self,
@@ -301,6 +448,8 @@ class SSHConnectionManager:
                 logger.warning(f"Error closing connection to {key}: {e}")
 
         self._connections.clear()
+        self._compatibility.clear()
+        self._logged_fallbacks.clear()
         logger.debug(f"SSH_POOL: cleared | closed_connections={connection_count}")
 
 
@@ -411,6 +560,33 @@ async def execute_command(
 
     logger.debug(f"LOCAL_EXEC: {cmd_str}")
     return await _execute_local(command, encoding=encoding)
+
+
+async def execute_compatible_command(
+    capability: str,
+    host: str | None = None,
+    encoding: str | None = "utf-8",
+) -> tuple[int, str | bytes, str | bytes, str]:
+    """Execute the command variant selected by the remote capability probe."""
+
+    try:
+        variants = COMPATIBILITY_COMMANDS[capability]
+    except KeyError as error:
+        raise ValueError(f"Unknown compatibility capability: {capability}") from error
+
+    selected = variants[0]
+    profile = None
+    if host:
+        profile = await _connection_manager.get_compatibility(host)
+        selected_name = profile.variants.get(capability)
+        selected = next((variant for variant in variants if variant.name == selected_name), None)
+        if selected is None:
+            raise ConnectionError(f"No selected command variant for {capability} on {host}")
+
+    returncode, stdout, stderr = await execute_command(selected.args, host=host, encoding=encoding)
+    if host and profile is not None:
+        _connection_manager.log_fallback(host, capability, profile)
+    return returncode, stdout, stderr, selected.name
 
 
 async def execute_with_fallback(
