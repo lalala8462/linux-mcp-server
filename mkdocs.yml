@@ -65,6 +65,7 @@ nav:
       - Configuration Reference: config-reference.md
       - Guarded Command Execution: guarded-command-execution.md
       - Security Best Practices: security.md
+      - CentOS Read-Only SSH Overlay: centos-readonly-overlay.md
       - Architecture: architecture.md
       - Debug Logging: debugging.md
   - Tools:

@@ -1,0 +1,16 @@
+{
+  "read_roots": [
+    "/opt/your-project"
+  ],
+  "scan_roots": [
+    "/opt",
+    "/var/log"
+  ],
+  "log_paths": [
+    "/var/log/messages",
+    "/var/log/secure",
+    "/var/log/mysqld.log"
+  ],
+  "max_file_read_bytes": 1048576,
+  "max_log_lines": 10000
+}

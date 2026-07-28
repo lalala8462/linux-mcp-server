@@ -1,0 +1,42 @@
+[mcp_servers.linux-centos-ro]
+command = "wsl.exe"
+# Replace <wsl-user> with the local WSL account that installed linux-mcp-server.
+args = ["-d", "Ubuntu", "--", "/home/<wsl-user>/.local/bin/linux-mcp-server"]
+startup_timeout_sec = 30
+tool_timeout_sec = 60
+required = false
+default_tools_approval_mode = "writes"
+enabled_tools = [
+  "get_system_information",
+  "get_cpu_information",
+  "get_memory_information",
+  "get_disk_usage",
+  "get_hardware_information",
+  "list_services",
+  "get_service_status",
+  "get_service_logs",
+  "list_processes",
+  "get_process_info",
+  "get_network_interfaces",
+  "get_network_connections",
+  "get_listening_ports",
+  "get_journal_logs",
+  "read_log_file",
+  "list_block_devices",
+  "list_directories",
+  "list_files",
+  "read_file",
+]
+
+[mcp_servers.linux-centos-ro.env]
+LINUX_MCP_TOOLSET = "fixed"
+LINUX_MCP_USER = "codex-ro"
+# Replace <wsl-user> here and in LINUX_MCP_KNOWN_HOSTS_PATH as well.
+LINUX_MCP_SSH_KEY_PATH = "/home/<wsl-user>/.local/share/linux-mcp-server/ssh/id_ed25519"
+LINUX_MCP_VERIFY_HOST_KEYS = "true"
+LINUX_MCP_KNOWN_HOSTS_PATH = "/home/<wsl-user>/.local/share/linux-mcp-server/ssh/known_hosts"
+LINUX_MCP_ALLOWED_LOG_PATHS = "/var/log/messages,/var/log/secure,/var/log/mysqld.log"
+LINUX_MCP_MAX_FILE_READ_BYTES = "1048576"
+LINUX_MCP_COMMAND_TIMEOUT = "30"
+LINUX_MCP_LOG_LEVEL = "INFO"
+LITELLM_LOCAL_MODEL_COST_MAP = "true"
