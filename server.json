@@ -66,8 +66,22 @@
           "isSecret": false
         },
         {
-          "name": "LINUX_MCP_ALLOWED_LOG_PATHS",
-          "description": "Comma-separated allowlist of log files",
+          "name": "LINUX_MCP_HOST_REGISTRY_PATH",
+          "description": "Directory containing alias-specific managed host profiles",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false
+        },
+        {
+          "name": "LINUX_MCP_REQUIRE_MANAGED_HOST",
+          "description": "Reject local execution and unknown host names unless an exact managed alias is registered",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false
+        },
+        {
+          "name": "LINUX_MCP_ALLOWED_ROOTS",
+          "description": "Comma-separated approved directory roots for log files",
           "isRequired": false,
           "format": "string",
           "isSecret": false

@@ -57,6 +57,7 @@ gcp = ["google-cloud-aiplatform>=1.147.0"]
 
 [project.scripts]
 linux-mcp-server = "linux_mcp_server.__main__:cli"
+linux-mcp-hosts = "linux_mcp_server.managed_hosts_cli:main"
 
 [dependency-groups]
 dev = [
@@ -205,6 +206,10 @@ order-by-type = false
 # Include the bundled mcp app html file
 [tool.hatch.build.targets.wheel.force-include]
 "mcp-app/dist" = "linux_mcp_server/ui_resources"
+"scripts/manage_linux_hosts.py" = "linux_mcp_server/managed_assets/manage_linux_hosts.py"
+"scripts/centos/collect-host-profile.py" = "linux_mcp_server/managed_assets/centos/collect-host-profile.py"
+"scripts/centos/install-readonly-account.sh" = "linux_mcp_server/managed_assets/centos/install-readonly-account.sh"
+"scripts/centos/linux-mcp-readonly.py" = "linux_mcp_server/managed_assets/centos/linux-mcp-readonly.py"
 
 # Force hatch to pick up the bundled app that is git-ignored
 [tool.hatch.build]

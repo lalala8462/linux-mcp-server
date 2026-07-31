@@ -4,10 +4,15 @@ from mcp.types import ToolAnnotations
 
 from linux_mcp_server.audit import log_tool_call
 from linux_mcp_server.commands import get_command
+from linux_mcp_server.connection.ssh import execute_command
 from linux_mcp_server.formatters import format_listening_ports
 from linux_mcp_server.formatters import format_network_connections
 from linux_mcp_server.formatters import format_network_interfaces
+from linux_mcp_server.host_registry import get_host_capability
+from linux_mcp_server.parsers import parse_ip_address
 from linux_mcp_server.parsers import parse_ip_brief
+from linux_mcp_server.parsers import parse_netstat_connections
+from linux_mcp_server.parsers import parse_netstat_listening
 from linux_mcp_server.parsers import parse_proc_net_dev
 from linux_mcp_server.parsers import parse_ss_connections
 from linux_mcp_server.parsers import parse_ss_listening
@@ -15,6 +20,10 @@ from linux_mcp_server.server import mcp
 from linux_mcp_server.utils.decorators import disallow_local_execution_in_containers
 from linux_mcp_server.utils.types import Host
 from linux_mcp_server.utils.validation import is_successful_output
+
+
+def _as_text(value: str | bytes) -> str:
+    return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value
 
 
 @mcp.tool(
@@ -38,10 +47,18 @@ async def get_network_interfaces(
 
     # Get brief interface info
     brief_cmd = get_command("network_interfaces", "brief")
-    returncode, stdout, _ = await brief_cmd.run(host=host)
+    capability = get_host_capability(host, "get_network_interfaces")
+    if capability is not None:
+        variant = capability.backend
+        args = ("ip", "address") if variant == "ip_address" else ("ip", "-brief", "address")
+        returncode, stdout, _ = await execute_command(args, host=host)
+        stdout = _as_text(stdout)
+    else:
+        returncode, stdout, _ = await brief_cmd.run(host=host)
+        variant = "ip_brief"
 
     if is_successful_output(returncode, stdout):
-        interfaces = parse_ip_brief(stdout)
+        interfaces = parse_ip_address(stdout) if variant == "ip_address" else parse_ip_brief(stdout)
 
     # Get network statistics from /proc/net/dev
     stats_cmd = get_command("network_interfaces", "stats")
@@ -71,10 +88,19 @@ async def get_network_connections(
     """
     cmd = get_command("network_connections")
 
-    returncode, stdout, stderr = await cmd.run(host=host)
+    capability = get_host_capability(host, "get_network_connections")
+    if capability is not None:
+        variant = capability.backend
+        args = ("netstat", "-tunap") if variant == "netstat" else ("ss", "-tunap")
+        returncode, stdout, stderr = await execute_command(args, host=host)
+        stdout = _as_text(stdout)
+        stderr = _as_text(stderr)
+    else:
+        returncode, stdout, stderr = await cmd.run(host=host)
+        variant = "ss"
 
     if is_successful_output(returncode, stdout):
-        connections = parse_ss_connections(stdout)
+        connections = parse_netstat_connections(stdout) if variant == "netstat" else parse_ss_connections(stdout)
         return format_network_connections(connections)
     return f"Error getting network connections: return code {returncode}, stderr: {stderr}"
 
@@ -97,9 +123,18 @@ async def get_listening_ports(
     """
     cmd = get_command("listening_ports")
 
-    returncode, stdout, stderr = await cmd.run(host=host)
+    capability = get_host_capability(host, "get_listening_ports")
+    if capability is not None:
+        variant = capability.backend
+        args = ("netstat", "-tulnp") if variant == "netstat" else ("ss", "-tulnp")
+        returncode, stdout, stderr = await execute_command(args, host=host)
+        stdout = _as_text(stdout)
+        stderr = _as_text(stderr)
+    else:
+        returncode, stdout, stderr = await cmd.run(host=host)
+        variant = "ss"
 
     if is_successful_output(returncode, stdout):
-        ports = parse_ss_listening(stdout)
+        ports = parse_netstat_listening(stdout) if variant == "netstat" else parse_ss_listening(stdout)
         return format_listening_ports(ports)
     return f"Error getting listening ports: return code {returncode}, stderr: {stderr}"

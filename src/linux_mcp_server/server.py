@@ -65,14 +65,14 @@ These tools map to six areas:
 - **Network:** interfaces and stats, active connections, listening ports and processes.
 - **Processes:** full process list and detailed info for a given PID.
 - **Storage and files:** block devices; list directories or files under a path (sort by size, name, or modification time); read a file. Paths must be absolute.
-- **Logs:** systemd journal with filters (unit, priority, time, transport) and tail of a specific log file. Log file paths are restricted to an allowlist (LINUX_MCP_ALLOWED_LOG_PATHS).
+- **Logs:** systemd journal with filters (unit, priority, time, transport) and tail of a specific log file below an approved root (LINUX_MCP_ALLOWED_ROOTS).
 
 ## Behavior
 
 - **Remote execution:** Every tool accepts an optional `host` argument. When set, the work runs on that host over SSH instead of locally.
 - **Containers:** If the `container` environment variable is set, tools refuse to run locally; a remote `host` must be used.
 - **Read-only vs destructive:** All tools are marked read-only. Do not expect to be able to modify the system.
-- **Log file access:** requires explicit allowlist configuration via LINUX_MCP_ALLOWED_LOG_PATHS
+- **Log file access:** requires explicit root configuration via LINUX_MCP_ALLOWED_ROOTS
 - **Service names:** automatically append '.service' suffix if not provided
 - **File paths:** must be absolute
 """
@@ -108,7 +108,7 @@ You must validate a script before it will be allowed to run.
 
 - **Remote execution:** Every tool accepts an optional `host` argument. When set, the work runs on that host over SSH instead of locally.
 - **Containers:** If the `container` environment variable is set, tools refuse to run locally; a remote `host` must be used.
-- **Log file access:** requires explicit allowlist configuration via LINUX_MCP_ALLOWED_LOG_PATHS
+- **Log file access:** requires explicit root configuration via LINUX_MCP_ALLOWED_ROOTS
 - **Service names:** automatically append '.service' suffix if not provided
 - **File paths:** must be absolute
 """
@@ -124,7 +124,7 @@ These tools map to six areas:
 - **Network:** interfaces and stats, active connections, listening ports and processes.
 - **Processes:** full process list and detailed info for a given PID.
 - **Storage and files:** block devices; list directories or files under a path (sort by size, name, or modification time); read a file. Paths must be absolute.
-- **Logs:** systemd journal with filters (unit, priority, time, transport) and tail of a specific log file. Log file paths are restricted to an allowlist (LINUX_MCP_ALLOWED_LOG_PATHS).
+- **Logs:** systemd journal with filters (unit, priority, time, transport) and tail of a specific log file below an approved root (LINUX_MCP_ALLOWED_ROOTS).
 
 ## Script tools
 
@@ -154,7 +154,7 @@ These tools map to six areas:
 
 - **Remote execution:** Every tool accepts an optional `host` argument. When set, the work runs on that host over SSH instead of locally.
 - **Containers:** If the `container` environment variable is set, tools refuse to run locally; a remote `host` must be used.
-- **Log file access:** requires explicit allowlist configuration via LINUX_MCP_ALLOWED_LOG_PATHS
+- **Log file access:** requires explicit root configuration via LINUX_MCP_ALLOWED_ROOTS
 - **Service names:** automatically append '.service' suffix if not provided
 - **File paths:** must be absolute
 """

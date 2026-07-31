@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 用法（必须以 root 执行）：
-  install-readonly-account.sh <公钥文件> <策略 JSON> [账号名] [--adopt-existing]
+  install-readonly-account.sh <公钥文件> <策略 JSON> [账号名] [--adopt-existing] [--allow-rsa]
 
 示例（首次创建）：
   sudo bash install-readonly-account.sh \
@@ -18,6 +18,9 @@ usage() {
     /tmp/centos-policy.local.json \
     codex-ro \
     --adopt-existing
+
+CentOS 6/OpenSSH 5.3 的 RSA 4096 公钥必须显式增加 --allow-rsa。
+DSA 公钥始终拒绝。
 EOF
 }
 
@@ -115,6 +118,100 @@ write_managed_account() {
   mv "${temporary}" "${ACCOUNT_MARKER}"
 }
 
+validate_policy_file() {
+  local python_bin="/usr/bin/python"
+  if [[ ! -x "${python_bin}" ]]; then
+    python_bin="$(command -v python3)" || fail "未找到可用 Python，无法校验策略"
+  fi
+  "${python_bin}" - "$1" <<'PY'
+# -*- coding: utf-8 -*-
+from __future__ import print_function
+
+import json
+import os
+import sys
+
+try:
+    string_types = (basestring,)
+except NameError:
+    string_types = (str,)
+
+with open(sys.argv[1], "rb") as handle:
+    policy = json.loads(handle.read().decode("utf-8"))
+
+if any(key in policy for key in ("read_roots", "scan_roots", "log_paths")):
+    raise ValueError("策略格式已过期，请使用 allowed_root")
+allowed_root = policy.get("allowed_root")
+if not isinstance(allowed_root, string_types) or not allowed_root.startswith("/"):
+    raise ValueError("allowed_root 必须是绝对路径")
+if "\x00" in allowed_root or os.path.realpath(allowed_root) == "/":
+    raise ValueError("allowed_root 不能为 / 或包含 NUL")
+PY
+}
+
+validate_wrapper_runtime() {
+  local wrapper_source="$1"
+  local python_bin="${2:-/usr/bin/python}"
+  local resolved
+
+  [[ -x "${python_bin}" ]] || fail "固定命令解释器不存在：${python_bin}"
+  if ! resolved="$(
+    SSH_ORIGINAL_COMMAND='command -v tail' \
+      "${python_bin}" "${wrapper_source}" 2>&1
+  )"; then
+    fail "只读包装器运行时自检失败：${resolved}"
+  fi
+  [[ "${resolved}" == /*/tail ]] || fail "只读包装器命令定位结果无效：${resolved}"
+
+  if ! "${python_bin}" - "${wrapper_source}" <<'PY'
+# -*- coding: utf-8 -*-
+from __future__ import print_function
+
+import imp
+import sys
+
+wrapper = imp.load_source("linux_mcp_readonly_preflight", sys.argv[1])
+try:
+    wrapper._open_verified_path(
+        "/__linux_mcp_readonly_preflight_missing__",
+        ("/",),
+        "file",
+    )
+except wrapper.PolicyError as error:
+    rendered = wrapper._exception_text(error)
+    if not rendered.startswith(u"无法安全打开目标："):
+        raise RuntimeError("unexpected safe-open error")
+else:
+    raise RuntimeError("missing preflight path was opened")
+PY
+  then
+    fail "只读包装器安全打开异常自检失败"
+  fi
+}
+
+validate_public_key() {
+  local public_key_file="$1"
+  local allow_rsa="$2"
+  local public_key key_bits rsa_bits
+
+  public_key="$(tr -d '\r\n' < "${public_key_file}")"
+  case "${public_key}" in
+    ssh-ed25519\ *)
+      key_bits="$(ssh-keygen -lf "${public_key_file}" 2>/dev/null | awk '{print $1}')"
+      [[ "${key_bits}" == "256" ]] || fail "Ed25519 公钥格式无效"
+      ;;
+    ssh-rsa\ *)
+      [[ "${allow_rsa}" == true ]] || fail "RSA 公钥必须显式传入 --allow-rsa"
+      rsa_bits="$(ssh-keygen -lf "${public_key_file}" 2>/dev/null | awk '{print $1}')"
+      [[ "${rsa_bits}" == "4096" ]] || fail "仅接受 RSA 4096 公钥"
+      ;;
+    ssh-dss\ *|*)
+      fail "仅接受 Ed25519，或显式 --allow-rsa 的 RSA 4096 公钥；DSA 始终拒绝"
+      ;;
+  esac
+  printf '%s\n' "${public_key}"
+}
+
 if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
   return 0
 fi
@@ -123,7 +220,7 @@ if [[ "${EUID}" -ne 0 ]]; then
   fail "必须以 root 执行。"
 fi
 
-if [[ "$#" -lt 2 || "$#" -gt 4 ]]; then
+if [[ "$#" -lt 2 || "$#" -gt 5 ]]; then
   usage >&2
   exit 1
 fi
@@ -133,12 +230,17 @@ readonly POLICY_FILE="$2"
 shift 2
 TARGET_USER="codex-ro"
 ADOPT_EXISTING=false
+ALLOW_RSA=false
 TARGET_USER_SET=false
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
     --adopt-existing)
       [[ "${ADOPT_EXISTING}" == false ]] || fail "--adopt-existing 不能重复指定"
       ADOPT_EXISTING=true
+      ;;
+    --allow-rsa)
+      [[ "${ALLOW_RSA}" == false ]] || fail "--allow-rsa 不能重复指定"
+      ALLOW_RSA=true
       ;;
     --*)
       fail "未知参数：$1"
@@ -153,6 +255,7 @@ while [[ "$#" -gt 0 ]]; do
 done
 readonly TARGET_USER
 readonly ADOPT_EXISTING
+readonly ALLOW_RSA
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly WRAPPER_SOURCE="${SCRIPT_DIR}/linux-mcp-readonly.py"
 readonly WRAPPER_TARGET="/usr/local/libexec/linux-mcp-readonly.py"
@@ -167,12 +270,12 @@ validate_account_name "${TARGET_USER}"
 for required_file in "${PUBLIC_KEY_FILE}" "${POLICY_FILE}" "${WRAPPER_SOURCE}"; do
   [[ -f "${required_file}" ]] || fail "文件不存在：${required_file}"
 done
-if ! /usr/bin/python -m json.tool "${POLICY_FILE}" >/dev/null; then
-  fail "策略文件不是有效 JSON。"
+validate_wrapper_runtime "${WRAPPER_SOURCE}"
+if ! validate_policy_file "${POLICY_FILE}"; then
+  fail "策略必须是包含单个安全 allowed_root 的有效 JSON。"
 fi
 
-public_key="$(tr -d '\r\n' < "${PUBLIC_KEY_FILE}")"
-[[ "${public_key}" =~ ^ssh-ed25519[[:space:]] ]] || fail "仅接受 Ed25519 公钥。"
+public_key="$(validate_public_key "${PUBLIC_KEY_FILE}" "${ALLOW_RSA}")"
 
 if [[ -e "${ACCOUNT_MARKER}" ]]; then
   validate_managed_account "${ACCOUNT_MARKER}" "${TARGET_USER}"

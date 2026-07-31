@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 """CentOS 7 SSH ForceCommand 只读命令包装器。
 
-兼容 Python 2.7/3.x。所有命令均经 shlex 解析、参数白名单校验后，
+兼容 Python 2.6/3.x。所有命令均经 shlex 解析、参数白名单校验后，
 使用绝对路径和参数数组执行，不调用 Shell。
 """
+
 from __future__ import print_function
 
 import json
@@ -16,19 +17,29 @@ import sys
 import syslog
 
 
+try:
+    TEXT_TYPE = unicode  # pyright: ignore[reportUndefinedVariable]
+    STRING_TYPES = (basestring,)  # pyright: ignore[reportUndefinedVariable]
+except NameError:
+    TEXT_TYPE = str
+    STRING_TYPES = (str,)
+
+
 POLICY_PATH = "/etc/linux-mcp-readonly/policy.json"
 BINARY_DIRS = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
 PROC_SELF_FD = "/proc/self/fd"
-ALLOWED_BINARIES = {
+ALLOWED_BINARIES = set((
     "cat",
     "command",
     "du",
+    "df",
     "find",
     "findmnt",
     "free",
     "grep",
     "head",
     "hostname",
+    "chkconfig",
     "ip",
     "journalctl",
     "lscpu",
@@ -44,7 +55,7 @@ ALLOWED_BINARIES = {
     "top",
     "uname",
     "uptime",
-}
+))
 SERVICE_RE = re.compile(r"^[A-Za-z0-9_.@:-]{1,200}$")
 PID_RE = re.compile(r"^[1-9][0-9]{0,9}$")
 INTEGER_RE = re.compile(r"^[0-9]{1,10}$")
@@ -58,13 +69,13 @@ class PolicyError(Exception):
 
 
 def _write_syslog(priority, message):
-    if sys.version_info[0] < 3 and isinstance(message, unicode):
+    if sys.version_info[0] < 3 and isinstance(message, TEXT_TYPE):
         message = message.encode("utf-8")
     syslog.syslog(priority, message)
 
 
 def _write_stderr(message):
-    if sys.version_info[0] < 3 and isinstance(message, unicode):
+    if sys.version_info[0] < 3 and isinstance(message, TEXT_TYPE):
         message = message.encode("utf-8")
     print(message, file=sys.stderr)
 
@@ -75,15 +86,37 @@ def _text(value):
     return value
 
 
+def _format_text(template, *values):
+    return _text(template) % tuple(_text(value) for value in values)
+
+
+def _exception_text(error):
+    return TEXT_TYPE(error)
+
+
+def _split_command(original_command):
+    # Python 2.6 shlex 必须接收原生字节串；Python 3 才将 bytes 解码为 str。
+    if isinstance(original_command, bytes) and bytes is not str:
+        original_command = original_command.decode("utf-8", "strict")
+    return shlex.split(original_command, posix=True)
+
+
 def load_policy(path=POLICY_PATH):
     with open(path, "rb") as policy_file:
         data = json.loads(_text(policy_file.read()))
 
-    for key in ("read_roots", "scan_roots", "log_paths"):
-        value = data.get(key, [])
-        if not isinstance(value, list):
-            raise PolicyError("%s 必须是数组" % key)
-        data[key] = [os.path.realpath(_text(item)) for item in value]
+    legacy_keys = ("read_roots", "scan_roots", "log_paths")
+    if any(key in data for key in legacy_keys):
+        raise PolicyError("策略格式已过期，请使用单个 allowed_root 重新生成部署包")
+    allowed_root = data.get("allowed_root")
+    if not isinstance(allowed_root, STRING_TYPES):
+        raise PolicyError("allowed_root 必须是字符串")
+    allowed_root = _text(allowed_root)
+    if not allowed_root.startswith("/") or "\x00" in allowed_root:
+        raise PolicyError("allowed_root 必须是安全的绝对路径")
+    data["allowed_root"] = os.path.realpath(allowed_root)
+    if data["allowed_root"] == "/":
+        raise PolicyError("allowed_root 不能为 /")
 
     data["max_file_read_bytes"] = int(data.get("max_file_read_bytes", 1048576))
     data["max_log_lines"] = int(data.get("max_log_lines", 10000))
@@ -96,7 +129,7 @@ def load_policy(path=POLICY_PATH):
 
 def resolve_binary(name):
     if name not in ALLOWED_BINARIES or name == "command":
-        raise PolicyError("命令不在白名单：%s" % name)
+        raise PolicyError(_format_text("命令不在白名单：%s", name))
 
     for directory in BINARY_DIRS:
         candidate = os.path.join(directory, name)
@@ -105,11 +138,11 @@ def resolve_binary(name):
         real_candidate = os.path.realpath(candidate)
         file_stat = os.stat(real_candidate)
         if file_stat.st_uid != 0:
-            raise PolicyError("程序不是 root 所有：%s" % real_candidate)
+            raise PolicyError(_format_text("程序不是 root 所有：%s", real_candidate))
         if file_stat.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-            raise PolicyError("程序可被非 root 修改：%s" % real_candidate)
+            raise PolicyError(_format_text("程序可被非 root 修改：%s", real_candidate))
         return real_candidate
-    raise PolicyError("服务器未安装命令：%s" % name)
+    raise PolicyError(_format_text("服务器未安装命令：%s", name))
 
 
 def _within(path, roots):
@@ -120,29 +153,27 @@ def _within(path, roots):
             return canonical
         if canonical.startswith(normalized_root + os.sep):
             return canonical
-    raise PolicyError("路径不在批准范围：%s" % path)
+    raise PolicyError(_format_text("路径不在批准范围：%s", path))
 
 
 def _read_path(path, policy):
-    canonical = _within(path, policy["read_roots"])
+    canonical = _within(path, (policy["allowed_root"],))
     if not os.path.isfile(canonical):
-        raise PolicyError("读取目标不是普通文件：%s" % path)
+        raise PolicyError(_format_text("读取目标不是普通文件：%s", path))
     return canonical
 
 
 def _scan_path(path, policy):
-    canonical = _within(path, policy["scan_roots"])
+    canonical = _within(path, (policy["allowed_root"],))
     if not os.path.isdir(canonical):
-        raise PolicyError("扫描目标不是目录：%s" % path)
+        raise PolicyError(_format_text("扫描目标不是目录：%s", path))
     return canonical
 
 
 def _log_path(path, policy):
-    canonical = os.path.realpath(path)
-    if canonical not in policy["log_paths"]:
-        raise PolicyError("日志未登记：%s" % path)
+    canonical = _within(path, (policy["allowed_root"],))
     if not os.path.isfile(canonical):
-        raise PolicyError("日志目标不是普通文件：%s" % path)
+        raise PolicyError(_format_text("日志目标不是普通文件：%s", path))
     return canonical
 
 
@@ -172,19 +203,19 @@ def _open_verified_path(path, roots, expected_kind, exact_path=None):
     try:
         descriptor = os.open(path, flags)
     except OSError as error:
-        raise PolicyError("无法安全打开目标：%s" % _text(str(error)))
+        raise PolicyError(_format_text("无法安全打开目标：%s", _exception_text(error)))
 
     try:
         target_stat = os.fstat(descriptor)
         if expected_kind == "file" and not stat.S_ISREG(target_stat.st_mode):
-            raise PolicyError("读取目标不是普通文件：%s" % path)
+            raise PolicyError(_format_text("读取目标不是普通文件：%s", path))
         if expected_kind == "directory" and not stat.S_ISDIR(target_stat.st_mode):
-            raise PolicyError("扫描目标不是目录：%s" % path)
+            raise PolicyError(_format_text("扫描目标不是目录：%s", path))
 
         opened_path = os.path.realpath(_fd_path(descriptor))
         if exact_path is not None:
             if opened_path != exact_path:
-                raise PolicyError("打开后的日志目标已变化：%s" % path)
+                raise PolicyError(_format_text("打开后的日志目标已变化：%s", path))
         else:
             _within(opened_path, roots)
         _make_inheritable(descriptor)
@@ -201,22 +232,21 @@ def _prepare_path_command(validated, policy):
     descriptor = None
 
     if name in ("head", "stat"):
-        descriptor = _open_verified_path(command[-1], policy["read_roots"], "file")
+        descriptor = _open_verified_path(command[-1], (policy["allowed_root"],), "file")
         command[-1] = _fd_path(descriptor)
     elif name == "tail":
         descriptor = _open_verified_path(
             command[-1],
-            (),
+            (policy["allowed_root"],),
             "file",
-            exact_path=command[-1],
         )
         command[-1] = _fd_path(descriptor)
     elif name == "du":
-        descriptor = _open_verified_path(command[-1], policy["scan_roots"], "directory")
+        descriptor = _open_verified_path(command[-1], (policy["allowed_root"],), "directory")
         command.insert(1, "-H")
         command[-1] = _fd_path(descriptor)
     elif name == "find":
-        descriptor = _open_verified_path(command[1], policy["scan_roots"], "directory")
+        descriptor = _open_verified_path(command[1], (policy["allowed_root"],), "directory")
         command.insert(1, "-H")
         command[2] = _fd_path(descriptor)
 
@@ -225,10 +255,10 @@ def _prepare_path_command(validated, policy):
 
 def _bounded_integer(value, minimum, maximum, label):
     if not INTEGER_RE.match(value):
-        raise PolicyError("%s 不是整数" % label)
+        raise PolicyError(_format_text("%s 不是整数", label))
     parsed = int(value)
     if parsed < minimum or parsed > maximum:
-        raise PolicyError("%s 超出范围 %d..%d" % (label, minimum, maximum))
+        raise PolicyError(_format_text("%s 超出范围 %d..%d", label, minimum, maximum))
     return value
 
 
@@ -279,13 +309,13 @@ def _validate_journalctl(args, policy):
     return args
 
 
-def validate_command(original_command, policy):
+def validate_command(original_command, policy):  # noqa: C901
     if not original_command or len(original_command) > 4096:
         raise PolicyError("SSH_ORIGINAL_COMMAND 为空或过长")
     try:
-        argv = shlex.split(_text(original_command), posix=True)
+        argv = _split_command(original_command)
     except ValueError as error:
-        raise PolicyError("命令解析失败：%s" % error)
+        raise PolicyError(_format_text("命令解析失败：%s", error))
     if not argv:
         raise PolicyError("命令为空")
     _reject_ambiguous_tokens(argv)
@@ -293,7 +323,7 @@ def validate_command(original_command, policy):
     name = os.path.basename(argv[0])
     args = argv[1:]
     if name not in ALLOWED_BINARIES or name == "command":
-        raise PolicyError("命令不在白名单：%s" % name)
+        raise PolicyError(_format_text("命令不在白名单：%s", name))
 
     exact = {
         "hostname": [()],
@@ -316,17 +346,22 @@ def validate_command(original_command, policy):
             ("--df", "--json"),
             ("-D", "-P", "-o", "SOURCE,FSTYPE,SIZE,USED,AVAIL,USE%,TARGET"),
         ],
+        "df": [("-P", "-B1")],
+        "chkconfig": [("--list",)],
     }
     if name in exact:
         if tuple(args) not in exact[name]:
-            raise PolicyError("%s 参数不在白名单" % name)
+            raise PolicyError(_format_text("%s 参数不在白名单", name))
         return [name] + args
 
     if name == "cat":
         allowed = (
             ("/etc/os-release",),
+            ("/etc/redhat-release",),
             ("/proc/loadavg",),
             ("/proc/net/dev",),
+            ("/proc/stat",),
+            ("/proc/uptime",),
         )
         if tuple(args) in allowed:
             return [name] + args
@@ -381,13 +416,13 @@ def validate_command(original_command, policy):
             raise PolicyError("find 深度参数无效")
         if args[6] not in ("d", "f") or args[7] != "-printf":
             raise PolicyError("find 类型或输出参数无效")
-        allowed_formats = {
+        allowed_formats = set((
             ("d", "%f\\n"),
             ("d", "%T@\\t%f\\n"),
             ("f", "%f\\n"),
             ("f", "%T@\\t%f\\n"),
             ("f", "%s\\t%f\\n"),
-        }
+        ))
         if (args[6], args[8]) not in allowed_formats:
             raise PolicyError("find 输出格式无效")
         args[0] = _scan_path(args[0], policy)
@@ -420,19 +455,19 @@ def validate_command(original_command, policy):
         args[2] = _log_path(args[2], policy)
         return [name] + args
 
-    raise PolicyError("命令尚未实现白名单校验：%s" % name)
+    raise PolicyError(_format_text("命令尚未实现白名单校验：%s", name))
 
 
 def _handle_command_lookup(original_command):
     try:
-        argv = shlex.split(_text(original_command), posix=True)
+        argv = _split_command(original_command)
     except ValueError:
         return False
     if len(argv) != 3 or argv[0] != "command" or argv[1] != "-v":
         return False
     name = argv[2]
     if name not in ALLOWED_BINARIES or name == "command":
-        raise PolicyError("禁止查询程序：%s" % name)
+        raise PolicyError(_format_text("禁止查询程序：%s", name))
     print(resolve_binary(name))
     return True
 
@@ -447,7 +482,7 @@ def main():
         prepared, _descriptor = _prepare_path_command(validated, policy)
         binary = resolve_binary(prepared[0])
         argv = [binary] + prepared[1:]
-        _write_syslog(syslog.LOG_INFO, "ALLOW %s" % original_command.replace("\n", "\\n"))
+        _write_syslog(syslog.LOG_INFO, _format_text("ALLOW %s", original_command.replace("\n", "\\n")))
         safe_env = {
             "HOME": os.path.expanduser("~"),
             "LANG": "C",
@@ -459,14 +494,13 @@ def main():
     except PolicyError as error:
         _write_syslog(
             syslog.LOG_WARNING,
-            "DENY %s reason=%s"
-            % (original_command.replace("\n", "\\n"), _text(str(error))),
+            _format_text("DENY %s reason=%s", original_command.replace("\n", "\\n"), _exception_text(error)),
         )
-        _write_stderr(u"拒绝：%s" % _text(str(error)))
+        _write_stderr(_format_text("拒绝：%s", _exception_text(error)))
         return 126
     except Exception as error:
-        _write_syslog(syslog.LOG_ERR, "ERROR %s" % _text(str(error)))
-        _write_stderr(u"包装器错误：%s" % _text(str(error)))
+        _write_syslog(syslog.LOG_ERR, _format_text("ERROR %s", _exception_text(error)))
+        _write_stderr(_format_text("包装器错误：%s", _exception_text(error)))
         return 125
 
 

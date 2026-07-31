@@ -44,6 +44,7 @@ COMPATIBILITY_COMMANDS: Mapping[str, tuple[CommandVariant, ...]] = {
             name="centos7_pairs",
             args=("findmnt", "-D", "-P", "-o", "SOURCE,FSTYPE,SIZE,USED,AVAIL,USE%,TARGET"),
         ),
+        CommandVariant(name="centos6_df", args=("df", "-P", "-B1")),
     ),
     "block_devices": (
         CommandVariant(
@@ -174,6 +175,38 @@ def parse_findmnt_pairs(stdout: str) -> DiskUsage:
     return DiskUsage.model_validate({"filesystems": filesystems})
 
 
+def parse_df_posix(stdout: str) -> DiskUsage:
+    """Convert fixed ``df -P -B1`` output to the common disk model."""
+
+    _bounded_output(stdout)
+    lines = [line for line in stdout.splitlines() if line.strip()]
+    if len(lines) < 2 or "Filesystem" not in lines[0]:
+        raise ValueError("df output does not contain a valid header")
+    filesystems = []
+    for line in lines[1:]:
+        fields = line.split(None, 5)
+        if len(fields) != 6:
+            raise ValueError("df output contains an invalid row")
+        source, size, used, avail, use_percent, target = fields
+        for field, value in (("size", size), ("used", used), ("avail", avail)):
+            if not value.isdigit():
+                raise ValueError(f"df output contains an invalid {field}")
+        if not _PERCENT_RE.fullmatch(use_percent):
+            raise ValueError("df output contains an invalid percentage")
+        filesystems.append(
+            {
+                "source": source,
+                "fstype": "",
+                "size": size,
+                "used": used,
+                "avail": avail,
+                "use%": use_percent,
+                "target": target,
+            }
+        )
+    return DiskUsage.model_validate({"filesystems": filesystems})
+
+
 def parse_lsblk_pairs(stdout: str, *, require_parent_fields: bool = False) -> BlockDevices:
     """Convert CentOS 7 ``lsblk -P`` output to the upstream model."""
 
@@ -227,37 +260,48 @@ def parse_lsblk_pairs(stdout: str, *, require_parent_fields: bool = False) -> Bl
     )
 
 
+def _validate_disk_output(variant: str, stdout: str) -> None:
+    if variant == "native_json":
+        data = json.loads(stdout)
+        if not isinstance(data, dict) or not isinstance(data.get("filesystems"), list):
+            raise ValueError("findmnt JSON does not contain filesystems")
+        DiskUsage.model_validate(data)
+    elif variant == "centos6_df":
+        parse_df_posix(stdout)
+    else:
+        parse_findmnt_pairs(stdout)
+
+
+def _validate_block_output(variant: str, stdout: str) -> None:
+    if variant == "native_json":
+        data = json.loads(stdout)
+        if not isinstance(data, dict) or not isinstance(data.get("blockdevices"), list):
+            raise ValueError("lsblk JSON does not contain blockdevices")
+        BlockDevices.model_validate(data)
+    else:
+        parse_lsblk_pairs(stdout, require_parent_fields=variant == "centos7_pairs_parent")
+
+
+def _validate_memory_output(variant: str, stdout: str) -> None:
+    mem_lines = [line.split() for line in stdout.splitlines() if line.startswith("Mem:")]
+    minimum_fields = 8 if variant == "native_wide" else 4
+    if len(mem_lines) != 1 or len(mem_lines[0]) < minimum_fields:
+        raise ValueError("free output does not contain a valid Mem line")
+    for value in mem_lines[0][1:minimum_fields]:
+        int(value)
+
+
 def validate_variant_output(capability: str, variant: str, stdout: str) -> None:
     """Fail if a probe output cannot be consumed by the matching tool."""
 
     _bounded_output(stdout)
-    if capability == "disk_usage":
-        if variant == "native_json":
-            data = json.loads(stdout)
-            if not isinstance(data, dict) or not isinstance(data.get("filesystems"), list):
-                raise ValueError("findmnt JSON does not contain filesystems")
-            DiskUsage.model_validate(data)
-            return
-        parse_findmnt_pairs(stdout)
-        return
-
-    if capability == "block_devices":
-        if variant == "native_json":
-            data = json.loads(stdout)
-            if not isinstance(data, dict) or not isinstance(data.get("blockdevices"), list):
-                raise ValueError("lsblk JSON does not contain blockdevices")
-            BlockDevices.model_validate(data)
-            return
-        parse_lsblk_pairs(stdout, require_parent_fields=variant == "centos7_pairs_parent")
-        return
-
-    if capability == "memory_info":
-        mem_lines = [line.split() for line in stdout.splitlines() if line.startswith("Mem:")]
-        minimum_fields = 8 if variant == "native_wide" else 4
-        if len(mem_lines) != 1 or len(mem_lines[0]) < minimum_fields:
-            raise ValueError("free output does not contain a valid Mem line")
-        for value in mem_lines[0][1:minimum_fields]:
-            int(value)
-        return
-
-    raise ValueError(f"Unknown compatibility capability: {capability}")
+    validators = {
+        "disk_usage": _validate_disk_output,
+        "block_devices": _validate_block_output,
+        "memory_info": _validate_memory_output,
+    }
+    try:
+        validator = validators[capability]
+    except KeyError as error:
+        raise ValueError(f"Unknown compatibility capability: {capability}") from error
+    validator(variant, stdout)

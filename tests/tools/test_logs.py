@@ -6,12 +6,12 @@ from fastmcp.exceptions import ToolError
 
 
 @pytest.fixture
-def mock_allowed_log_paths(mocker):
-    """Fixture factory to set CONFIG.allowed_log_paths for read_log_file tests."""
+def mock_allowed_roots(mocker):
+    """Fixture factory to set CONFIG.allowed_roots for read_log_file tests."""
 
     def _set_paths(paths=""):
         mock_config = mocker.patch("linux_mcp_server.tools.logs.CONFIG")
-        mock_config.allowed_log_paths = paths
+        mock_config.allowed_roots = paths
         return mock_config
 
     return _set_paths
@@ -174,13 +174,13 @@ class TestReadLogFile:
     """Tests for read_log_file tool."""
 
     @pytest.fixture
-    def setup_log_file(self, mcp_client, tmp_path, mock_allowed_log_paths):
-        """Create a test log file and configure allowed paths."""
+    def setup_log_file(self, mcp_client, tmp_path, mock_allowed_roots):
+        """Create a test log file and configure its containing root."""
 
         def _setup(content="Test log content\nLine 2\nLine 3"):
             log_file = tmp_path / "test.log"
             log_file.write_text(content)
-            mock_allowed_log_paths(str(log_file))
+            mock_allowed_roots(str(tmp_path))
             return log_file
 
         return _setup
@@ -214,11 +214,11 @@ class TestReadLogFile:
         cmd_args = mock_execute_with_fallback.call_args[0][0]
         assert "50" in cmd_args
 
-    async def test_read_log_file_no_allowed_paths(self, mcp_client, mock_allowed_log_paths):
-        """Test read_log_file when no allowed paths are configured."""
-        mock_allowed_log_paths("")
+    async def test_read_log_file_no_allowed_roots(self, mcp_client, mock_allowed_roots):
+        """Test read_log_file when no allowed roots are configured."""
+        mock_allowed_roots("")
 
-        with pytest.raises(ToolError, match="No log files are allowed"):
+        with pytest.raises(ToolError, match="No log roots are allowed"):
             await mcp_client.call_tool("read_log_file", {"log_path": "/var/log/test.log"})
 
     @pytest.mark.parametrize(
@@ -230,12 +230,14 @@ class TestReadLogFile:
         ids=["invalid-path", "path-not-in-list"],
     )
     async def test_read_log_file_path_validation(
-        self, mcp_client, mock_allowed_log_paths, tmp_path, test_scenario, log_path, match
+        self, mcp_client, mock_allowed_roots, tmp_path, test_scenario, log_path, match
     ):
         """Test read_log_file path validation scenarios."""
-        allowed_file = tmp_path / "allowed.log"
+        allowed_root = tmp_path / "approved"
+        allowed_root.mkdir()
+        allowed_file = allowed_root / "allowed.log"
         allowed_file.write_text("allowed")
-        mock_allowed_log_paths(str(allowed_file))
+        mock_allowed_roots(str(allowed_root))
 
         restricted_file = tmp_path / "restricted.log"
         restricted_file.write_text("restricted")
@@ -244,19 +246,19 @@ class TestReadLogFile:
         with pytest.raises(ToolError, match=match):
             await mcp_client.call_tool("read_log_file", {"log_path": test_path})
 
-    async def test_read_log_file_nonexistent_but_allowed(self, mcp_client, mock_allowed_log_paths, tmp_path):
+    async def test_read_log_file_nonexistent_but_allowed(self, mcp_client, mock_allowed_roots, tmp_path):
         """Test read_log_file when path is allowed but file doesn't exist."""
         nonexistent_file = tmp_path / "nonexistent.log"
-        mock_allowed_log_paths(str(nonexistent_file))
+        mock_allowed_roots(str(tmp_path))
 
         with pytest.raises(ToolError, match="Log file not found"):
             await mcp_client.call_tool("read_log_file", {"log_path": nonexistent_file})
 
-    async def test_read_log_file_path_is_directory(self, mcp_client, mock_allowed_log_paths, tmp_path):
+    async def test_read_log_file_path_is_directory(self, mcp_client, mock_allowed_roots, tmp_path):
         """Test read_log_file when path is a directory, not a file."""
         log_dir = tmp_path / "logdir"
         log_dir.mkdir()
-        mock_allowed_log_paths(str(log_dir))
+        mock_allowed_roots(str(tmp_path))
 
         with pytest.raises(ToolError, match="Path is not a file"):
             await mcp_client.call_tool("read_log_file", {"log_path": log_dir})
@@ -294,16 +296,20 @@ class TestReadLogFile:
         with pytest.raises(ToolError, match="tail not found"):
             await mcp_client.call_tool("read_log_file", {"log_path": log_file})
 
-    async def test_read_log_file_multiple_allowed_paths(
-        self, mcp_client, mock_execute_with_fallback, mock_allowed_log_paths, tmp_path
+    async def test_read_log_file_multiple_allowed_roots(
+        self, mcp_client, mock_execute_with_fallback, mock_allowed_roots, tmp_path
     ):
-        """Test read_log_file with multiple allowed paths."""
-        log_file1 = tmp_path / "log1.log"
-        log_file2 = tmp_path / "log2.log"
+        """Test read_log_file with multiple allowed roots."""
+        first_root = tmp_path / "first"
+        second_root = tmp_path / "second"
+        first_root.mkdir()
+        second_root.mkdir()
+        log_file1 = first_root / "log1.log"
+        log_file2 = second_root / "log2.log"
         log_file1.write_text("content1")
         log_file2.write_text("content2")
 
-        mock_allowed_log_paths(f"{log_file1},{log_file2}")
+        mock_allowed_roots("%s,%s" % (first_root, second_root))
         mock_execute_with_fallback.return_value = (0, "content2", "")
 
         result = await mcp_client.call_tool("read_log_file", {"log_path": log_file2})
@@ -311,10 +317,10 @@ class TestReadLogFile:
 
         assert "content2" in content["entries"]
 
-    async def test_read_log_file_remote_execution(self, mcp_client, mock_execute_with_fallback, mock_allowed_log_paths):
+    async def test_read_log_file_remote_execution(self, mcp_client, mock_execute_with_fallback, mock_allowed_roots):
         """Test read_log_file with remote execution."""
         log_path = "/var/log/remote.log"
-        mock_allowed_log_paths(log_path)
+        mock_allowed_roots("/var/log")
         mock_execute_with_fallback.return_value = (0, "Remote log content\nLine 2", "")
 
         result = await mcp_client.call_tool("read_log_file", {"log_path": log_path, "host": "remote.server.com"})
@@ -327,11 +333,11 @@ class TestReadLogFile:
         assert call_kwargs["host"] == "remote.server.com"
 
     async def test_read_log_file_remote_skips_local_validation(
-        self, mcp_client, mock_execute_with_fallback, mock_allowed_log_paths
+        self, mcp_client, mock_execute_with_fallback, mock_allowed_roots
     ):
         """Test that remote execution skips local path validation."""
         log_path = "/nonexistent/remote.log"
-        mock_allowed_log_paths(log_path)
+        mock_allowed_roots("/nonexistent")
         mock_execute_with_fallback.return_value = (0, "Remote content", "")
 
         result = await mcp_client.call_tool("read_log_file", {"log_path": log_path, "host": "remote.server.com"})
@@ -339,14 +345,28 @@ class TestReadLogFile:
 
         assert "Remote content" in content["entries"]
 
-    async def test_read_log_file_remote_not_in_allowed_paths(self, mcp_client, mock_allowed_log_paths, tmp_path):
-        """Test that remote execution still checks allowed paths."""
-        allowed_path = tmp_path / "allowed.log"
+    async def test_read_log_file_remote_rejects_parent_traversal(
+        self, mcp_client, mock_execute_with_fallback, mock_allowed_roots
+    ):
+        mock_allowed_roots("/var/log")
+
+        with pytest.raises(ToolError, match="not allowed"):
+            await mcp_client.call_tool(
+                "read_log_file",
+                {"log_path": "/var/log/../private/error.log", "host": "remote.server.com"},
+            )
+        mock_execute_with_fallback.assert_not_called()
+
+    async def test_read_log_file_remote_not_in_allowed_roots(self, mcp_client, mock_allowed_roots, tmp_path):
+        """Test that remote execution still checks allowed roots."""
+        allowed_root = tmp_path / "approved"
+        allowed_root.mkdir()
+        allowed_path = allowed_root / "allowed.log"
         restricted_path = tmp_path / "restricted.log"
         allowed_path.write_text("allowed")
         restricted_path.write_text("restricted")
 
-        mock_allowed_log_paths(str(allowed_path))
+        mock_allowed_roots(str(allowed_root))
 
         with pytest.raises(ToolError, match="not allowed"):
             await mcp_client.call_tool("read_log_file", {"log_path": restricted_path, "host": "remote.server.com"})

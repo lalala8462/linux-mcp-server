@@ -6,6 +6,7 @@ startup_timeout_sec = 30
 tool_timeout_sec = 60
 required = false
 default_tools_approval_mode = "writes"
+enabled = true
 enabled_tools = [
   "get_system_information",
   "get_cpu_information",
@@ -29,13 +30,17 @@ enabled_tools = [
 ]
 
 [mcp_servers.linux-centos-ro.env]
+# wsl.exe imports these Windows-side MCP variables only when WSLENV names them.
+WSLENV = "LINUX_MCP_TOOLSET:LINUX_MCP_USER:LINUX_MCP_SSH_KEY_PATH:LINUX_MCP_VERIFY_HOST_KEYS:LINUX_MCP_KNOWN_HOSTS_PATH:LINUX_MCP_HOST_REGISTRY_PATH:LINUX_MCP_REQUIRE_MANAGED_HOST:LINUX_MCP_ALLOWED_ROOTS:LINUX_MCP_MAX_FILE_READ_BYTES:LINUX_MCP_COMMAND_TIMEOUT:LINUX_MCP_LOG_LEVEL:LITELLM_LOCAL_MODEL_COST_MAP"
 LINUX_MCP_TOOLSET = "fixed"
 LINUX_MCP_USER = "codex-ro"
-# Replace <wsl-user> here and in LINUX_MCP_KNOWN_HOSTS_PATH as well.
+# Managed profiles override these legacy single-host paths per alias.
 LINUX_MCP_SSH_KEY_PATH = "/home/<wsl-user>/.local/share/linux-mcp-server/ssh/id_ed25519"
 LINUX_MCP_VERIFY_HOST_KEYS = "true"
 LINUX_MCP_KNOWN_HOSTS_PATH = "/home/<wsl-user>/.local/share/linux-mcp-server/ssh/known_hosts"
-LINUX_MCP_ALLOWED_LOG_PATHS = "/var/log/messages,/var/log/secure,/var/log/mysqld.log"
+LINUX_MCP_HOST_REGISTRY_PATH = "/home/<wsl-user>/.local/share/linux-mcp-server/hosts"
+LINUX_MCP_REQUIRE_MANAGED_HOST = "true"
+LINUX_MCP_ALLOWED_ROOTS = "/opt/your-project"
 LINUX_MCP_MAX_FILE_READ_BYTES = "1048576"
 LINUX_MCP_COMMAND_TIMEOUT = "30"
 LINUX_MCP_LOG_LEVEL = "INFO"

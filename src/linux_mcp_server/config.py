@@ -168,8 +168,8 @@ class Config(BaseSettings):
     log_level: UpperCase = "INFO"
     log_retention_days: int = 10
 
-    # Log file access control
-    allowed_log_paths: str | None = None
+    # Remote log file access control. Each value is an approved directory root.
+    allowed_roots: str | None = None
 
     # Storage tool safety limits
     max_file_read_bytes: int = Field(default=1024 * 1024, ge=1)
@@ -182,6 +182,8 @@ class Config(BaseSettings):
     # SSH host key verification (security)
     verify_host_keys: bool = True
     known_hosts_path: Path | None = None  # Custom path to known_hosts file
+    host_registry_path: Path | None = None
+    require_managed_host: bool = False
 
     # What tools are available
     toolset: Toolset = Toolset.FIXED

@@ -31,6 +31,8 @@ from linux_mcp_server.compatibility import parse_os_release
 from linux_mcp_server.compatibility import validate_variant_output
 from linux_mcp_server.config import CONFIG
 from linux_mcp_server.execution_context import get_execution_context
+from linux_mcp_server.host_registry import get_managed_profile
+from linux_mcp_server.host_registry import HostProfile
 from linux_mcp_server.utils.types import Host
 
 
@@ -115,6 +117,15 @@ class SSHConnectionManager:
         return cls._instance
 
     def _connection_settings(self, host: str) -> tuple[str, str | None, str]:
+        profile = get_managed_profile(host)
+        if profile is not None:
+            ssh_key = str(profile.ssh.private_key_path)
+            key = (
+                f"{profile.alias}:{profile.address}:{profile.port}:{ssh_key}:"
+                f"{profile.user}:{profile.ssh.host_fingerprint}"
+            )
+            return key, ssh_key, profile.user
+
         context = get_execution_context()
         if context is not None:
             ssh_key = str(context.ssh_key_path) if context.ssh_key_path else self._ssh_key
@@ -139,6 +150,7 @@ class SSHConnectionManager:
         Raises:
             ConnectionError: If connection fails
         """
+        profile = get_managed_profile(host)
         key, ssh_key, username = self._connection_settings(host)
 
         # Return existing connection if available
@@ -170,16 +182,24 @@ class SSHConnectionManager:
         try:
             # Determine host key verification settings
             if CONFIG.verify_host_keys:
-                known_hosts = str(CONFIG.effective_known_hosts_path)
+                known_hosts = (
+                    str(profile.ssh.known_hosts_path) if profile is not None else str(CONFIG.effective_known_hosts_path)
+                )
             else:
                 logger.warning("SSH host key verification disabled - vulnerable to MITM attacks")
                 known_hosts = None
 
             connect_kwargs = {
-                "host": host,
+                "host": profile.address if profile is not None else host,
                 "known_hosts": known_hosts,
                 "passphrase": CONFIG.key_passphrase.get_secret_value() or None,
             }
+            if profile is not None:
+                connect_kwargs["port"] = profile.port
+                self._validate_managed_ssh_files(profile)
+                if profile.ssh.legacy_rsa:
+                    connect_kwargs["server_host_key_algs"] = ["ssh-rsa"]
+                    connect_kwargs["signature_algs"] = ["ssh-rsa"]
 
             # Use custom SSH key if provided, otherwise use default
             if ssh_key:
@@ -205,7 +225,11 @@ class SSHConnectionManager:
             logger.debug(f"SSH_POOL: add_connection | connections={len(self._connections)}")
 
             try:
-                self._compatibility[key] = await self._probe_compatibility(host, conn)
+                self._compatibility[key] = (
+                    self._profile_compatibility(profile)
+                    if profile is not None
+                    else await self._probe_compatibility(host, conn)
+                )
             except Exception:
                 self._connections.pop(key, None)
                 conn.close()
@@ -223,6 +247,46 @@ class SSHConnectionManager:
             error_msg = str(e)
             log_ssh_connect(host, status=Status.failed, error=error_msg)
             raise ConnectionError(f"Failed to connect to {host}: {e}") from e
+
+    @staticmethod
+    def _validate_managed_ssh_files(profile: HostProfile) -> None:
+        for label, path in (
+            ("private key", profile.ssh.private_key_path),
+            ("known_hosts", profile.ssh.known_hosts_path),
+        ):
+            if path.is_symlink() or not path.is_file():
+                raise ConnectionError(f"Managed {label} is missing or unsafe for {profile.alias}")
+            if os.name == "posix" and path.stat().st_mode & 0o077:
+                raise ConnectionError(f"Managed {label} permissions are too broad for {profile.alias}")
+        expected_host = profile.address if profile.port == 22 else f"[{profile.address}]:{profile.port}"
+        try:
+            known_hosts = profile.ssh.known_hosts_path.read_text(encoding="ascii")
+        except (OSError, UnicodeDecodeError) as error:
+            raise ConnectionError(f"Managed known_hosts is unreadable for {profile.alias}") from error
+        expected_line = f"{expected_host} {profile.ssh.host_public_key}"
+        if known_hosts.strip() != expected_line:
+            raise ConnectionError(f"Managed known_hosts does not match the profile for {profile.alias}")
+
+    @staticmethod
+    def _profile_compatibility(profile: HostProfile) -> HostCompatibility:
+        capability_tools = {
+            "disk_usage": "get_disk_usage",
+            "block_devices": "list_block_devices",
+            "memory_info": "get_memory_information",
+        }
+        variants = {
+            capability: profile.capabilities[tool_name].backend
+            for capability, tool_name in capability_tools.items()
+            if profile.capabilities[tool_name].status != "unsupported"
+        }
+        return HostCompatibility(
+            host=profile.alias,
+            hostname=profile.alias,
+            os_id=profile.os.id,
+            os_version=profile.os.version,
+            kernel=profile.os.kernel,
+            variants=variants,
+        )
 
     async def _run_probe_command(
         self,

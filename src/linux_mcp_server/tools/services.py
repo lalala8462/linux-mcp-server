@@ -7,9 +7,11 @@ from pydantic import Field
 
 from linux_mcp_server.audit import log_tool_call
 from linux_mcp_server.commands import get_command
+from linux_mcp_server.connection.ssh import execute_command
 from linux_mcp_server.formatters import format_service_logs
 from linux_mcp_server.formatters import format_service_status
 from linux_mcp_server.formatters import format_services_list
+from linux_mcp_server.host_registry import get_host_capability
 from linux_mcp_server.parsers import parse_service_count
 from linux_mcp_server.server import mcp
 from linux_mcp_server.utils.decorators import disallow_local_execution_in_containers
@@ -33,6 +35,20 @@ async def list_services(
     Retrieves all systemd service units with their load state, active state,
     sub-state, and description. Also includes a count of currently running services.
     """
+    capability = get_host_capability(host, "list_services")
+    if capability is not None and capability.backend == "centos6_chkconfig":
+        returncode, stdout, stderr = await execute_command(("chkconfig", "--list"), host=host)
+        stdout = stdout.decode("utf-8", errors="replace") if isinstance(stdout, bytes) else stdout
+        stderr = stderr.decode("utf-8", errors="replace") if isinstance(stderr, bytes) else stderr
+        if returncode != 0:
+            return f"Error listing services: {stderr}"
+        if len(stdout.encode("utf-8", errors="replace")) > 1024 * 1024:
+            return "Error listing services: chkconfig output exceeded the 1 MiB limit"
+        return (
+            "PARTIAL: CentOS 6 SysV enablement data only; running service count "
+            "and runtime state are unavailable.\n" + stdout
+        )
+
     cmd = get_command("list_services")
     returncode, stdout, stderr = await cmd.run(host=host)
 

@@ -8,7 +8,7 @@ import pytest
 
 @pytest.mark.parametrize(
     "mcp_session",
-    [{"LINUX_MCP_ALLOWED_LOG_PATHS": "/var/log/boot.log,/tmp/existing_file.txt,/tmp/nonexisting_file.txt"}],
+    [{"LINUX_MCP_ALLOWED_ROOTS": "/var/log,/tmp"}],
     indirect=True,
 )
 async def test_read_existing_log_file(mcp_session):
@@ -42,7 +42,7 @@ async def test_read_existing_log_file(mcp_session):
 
 @pytest.mark.parametrize(
     "mcp_session",
-    [{"LINUX_MCP_ALLOWED_LOG_PATHS": "/var/log/boot.log,/tmp/existing_file.txt,/tmp/nonexisting_file.txt"}],
+    [{"LINUX_MCP_ALLOWED_ROOTS": "/var/log,/tmp"}],
     indirect=True,
 )
 async def test_read_non_existing_log_file(mcp_session):
@@ -59,7 +59,7 @@ async def test_read_non_existing_log_file(mcp_session):
 
 @pytest.mark.parametrize(
     "mcp_session",
-    [{"LINUX_MCP_ALLOWED_LOG_PATHS": "/var/log/boot.log,/tmp/existing_file.txt,/tmp/nonexisting_file.txt"}],
+    [{"LINUX_MCP_ALLOWED_ROOTS": "/var/log,/tmp"}],
     indirect=True,
 )
 async def test_read_not_allowed_log_file(mcp_session):
@@ -76,7 +76,7 @@ async def test_read_not_allowed_log_file(mcp_session):
 
 @pytest.mark.parametrize(
     "mcp_session",
-    [{"LINUX_MCP_ALLOWED_LOG_PATHS": "/var/log/boot.log,/tmp/existing_file.txt,/tmp/nonexisting_file.txt"}],
+    [{"LINUX_MCP_ALLOWED_ROOTS": "/var/log,/tmp"}],
     indirect=True,
 )
 async def test_read_log_file_empty_argument(mcp_session):
@@ -91,7 +91,7 @@ async def test_read_log_file_empty_argument(mcp_session):
 
 @pytest.mark.parametrize(
     "mcp_session",
-    [{"LINUX_MCP_ALLOWED_LOG_PATHS": "/var/log/boot.log,/tmp/existing_file.txt,/tmp/nonexisting_file.txt"}],
+    [{"LINUX_MCP_ALLOWED_ROOTS": "/var/log,/tmp"}],
     indirect=True,
 )
 @pytest.mark.skip(

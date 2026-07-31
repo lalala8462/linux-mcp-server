@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 from __future__ import print_function
 
+import ast
 import importlib.util
+import json
 import os
 import subprocess
 import tempfile
@@ -11,27 +13,76 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WRAPPER_PATH = os.path.join(ROOT, "scripts", "centos", "linux-mcp-readonly.py")
 SPEC = importlib.util.spec_from_file_location("linux_mcp_readonly", WRAPPER_PATH)
+if SPEC is None or SPEC.loader is None:
+    raise RuntimeError("无法加载只读包装器模块")
 WRAPPER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(WRAPPER)
+
+
+def test_wrapper_avoids_python27_collection_syntax():
+    with open(WRAPPER_PATH, encoding="utf-8") as source_file:
+        source = source_file.read()
+
+    tree = ast.parse(source, filename=WRAPPER_PATH)
+    incompatible_nodes = [
+        (type(node).__name__, node.lineno)
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Set, ast.SetComp, ast.DictComp))
+    ]
+    assert incompatible_nodes == []
+
+
+def test_wrapper_avoids_python26_implicit_ascii_error_formatting():
+    with open(WRAPPER_PATH, encoding="utf-8") as source_file:
+        tree = ast.parse(source_file.read(), filename=WRAPPER_PATH)
+
+    unsafe_lines = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Mod):
+            continue
+        template = getattr(node.left, "value", None)
+        if isinstance(template, str) and any(ord(char) > 127 for char in template):
+            unsafe_lines.append(node.lineno)
+
+    assert unsafe_lines == []
+
+
+def test_error_formatting_decodes_utf8_bytes_before_interpolation():
+    message = WRAPPER._format_text(
+        "拒绝：%s".encode(),
+        "服务器未安装命令：tail".encode(),
+    )
+
+    assert message == "拒绝：服务器未安装命令：tail"
+
+
+def test_exception_text_preserves_unicode():
+    assert WRAPPER._exception_text(Exception("无法安全打开目标")) == "无法安全打开目标"
+
+
+def test_command_split_accepts_native_text_and_utf8_bytes():
+    expected = ["command", "-v", "tail"]
+
+    assert WRAPPER._split_command("command -v tail") == expected
+    assert WRAPPER._split_command(b"command -v tail") == expected
 
 
 class ReadonlyWrapperTest(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.read_root = os.path.join(self.temp_dir.name, "project")
-        self.scan_root = os.path.join(self.temp_dir.name, "scan")
-        os.makedirs(self.read_root)
+        self.allowed_root = os.path.join(self.temp_dir.name, "project")
+        self.read_root = self.allowed_root
+        self.scan_root = os.path.join(self.allowed_root, "scan")
+        os.makedirs(self.allowed_root)
         os.makedirs(self.scan_root)
         self.read_file = os.path.join(self.read_root, "application.yml")
-        self.log_file = os.path.join(self.temp_dir.name, "messages")
+        self.log_file = os.path.join(self.allowed_root, "messages")
         with open(self.read_file, "w", encoding="utf-8") as file_handle:
             file_handle.write("server.port=8080\n")
         with open(self.log_file, "w", encoding="utf-8") as file_handle:
             file_handle.write("test\n")
         self.policy = {
-            "read_roots": [os.path.realpath(self.read_root)],
-            "scan_roots": [os.path.realpath(self.scan_root)],
-            "log_paths": [os.path.realpath(self.log_file)],
+            "allowed_root": os.path.realpath(self.allowed_root),
             "max_file_read_bytes": 1048576,
             "max_log_lines": 10000,
         }
@@ -80,22 +131,22 @@ class ReadonlyWrapperTest(unittest.TestCase):
             "lsblk -P -o NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE,MODEL",
             "findmnt --df --json",
             "findmnt -D -P -o SOURCE,FSTYPE,SIZE,USED,AVAIL,USE%,TARGET",
+            "df -P -B1",
+            "chkconfig --list",
             "du -b --one-file-system --max-depth=1 %s" % shlex_quote(self.scan_root),
-            "find %s -mindepth 1 -maxdepth 1 -type d -printf '%%f\\n'"
-            % shlex_quote(self.scan_root),
-            "find %s -mindepth 1 -maxdepth 1 -type d -printf '%%T@\\t%%f\\n'"
-            % shlex_quote(self.scan_root),
-            "find %s -mindepth 1 -maxdepth 1 -type f -printf '%%s\\t%%f\\n'"
-            % shlex_quote(self.scan_root),
-            "find %s -mindepth 1 -maxdepth 1 -type f -printf '%%f\\n'"
-            % shlex_quote(self.scan_root),
-            "find %s -mindepth 1 -maxdepth 1 -type f -printf '%%T@\\t%%f\\n'"
-            % shlex_quote(self.scan_root),
+            "find %s -mindepth 1 -maxdepth 1 -type d -printf '%%f\\n'" % shlex_quote(self.scan_root),
+            "find %s -mindepth 1 -maxdepth 1 -type d -printf '%%T@\\t%%f\\n'" % shlex_quote(self.scan_root),
+            "find %s -mindepth 1 -maxdepth 1 -type f -printf '%%s\\t%%f\\n'" % shlex_quote(self.scan_root),
+            "find %s -mindepth 1 -maxdepth 1 -type f -printf '%%f\\n'" % shlex_quote(self.scan_root),
+            "find %s -mindepth 1 -maxdepth 1 -type f -printf '%%T@\\t%%f\\n'" % shlex_quote(self.scan_root),
             "head --bytes 1048576 -- %s" % shlex_quote(self.read_file),
             "head --bytes 1048577 -- %s" % shlex_quote(self.read_file),
             "stat --dereference --format %%s -- %s" % shlex_quote(self.read_file),
             "hostname",
             "cat /etc/os-release",
+            "cat /etc/redhat-release",
+            "cat /proc/uptime",
+            "cat /proc/stat",
             "uname -r",
             "uname -m",
             "uptime -p",
@@ -121,13 +172,33 @@ class ReadonlyWrapperTest(unittest.TestCase):
         validated = WRAPPER.validate_command(command, self.policy)
         self.assertEqual(os.path.realpath(self.read_file), validated[-1])
 
+    def test_rejects_legacy_three_scope_policy(self):
+        policy_path = os.path.join(self.temp_dir.name, "legacy-policy.json")
+        with open(policy_path, "w", encoding="utf-8") as file_handle:
+            json.dump({"read_roots": [self.allowed_root]}, file_handle)
+        with self.assertRaises(WRAPPER.PolicyError):
+            WRAPPER.load_policy(policy_path)
+
+    def test_rejects_root_as_allowed_root(self):
+        policy_path = os.path.join(self.temp_dir.name, "root-policy.json")
+        with open(policy_path, "w", encoding="utf-8") as file_handle:
+            json.dump({"allowed_root": "/"}, file_handle)
+        with self.assertRaises(WRAPPER.PolicyError):
+            WRAPPER.load_policy(policy_path)
+
+    def test_denies_sibling_directory_with_shared_prefix(self):
+        sibling = self.allowed_root + "-other"
+        os.makedirs(sibling)
+        outside_file = os.path.join(sibling, "outside.log")
+        with open(outside_file, "w", encoding="utf-8") as file_handle:
+            file_handle.write("outside\n")
+        self.assert_denied("tail -n 1 %s" % shlex_quote(outside_file))
+
     def test_allows_directory_and_file_scans(self):
         commands = (
             "du -b --one-file-system --max-depth=1 %s" % shlex_quote(self.scan_root),
-            "find %s -mindepth 1 -maxdepth 1 -type d -printf '%%f\\n'"
-            % shlex_quote(self.scan_root),
-            "find %s -mindepth 1 -maxdepth 1 -type f -printf '%%s\\t%%f\\n'"
-            % shlex_quote(self.scan_root),
+            "find %s -mindepth 1 -maxdepth 1 -type d -printf '%%f\\n'" % shlex_quote(self.scan_root),
+            "find %s -mindepth 1 -maxdepth 1 -type f -printf '%%s\\t%%f\\n'" % shlex_quote(self.scan_root),
         )
         for command in commands:
             self.assertTrue(WRAPPER.validate_command(command, self.policy))
@@ -153,7 +224,7 @@ class ReadonlyWrapperTest(unittest.TestCase):
             file_handle.write("secret\n")
         os.symlink(outside_file, link_path)
         with self.assertRaises(WRAPPER.PolicyError):
-            WRAPPER._open_verified_path(link_path, self.policy["read_roots"], "file")
+            WRAPPER._open_verified_path(link_path, (self.policy["allowed_root"],), "file")
 
     def test_opened_descriptor_survives_later_path_replacement(self):
         replaceable = os.path.join(self.read_root, "replaceable.txt")
@@ -165,7 +236,7 @@ class ReadonlyWrapperTest(unittest.TestCase):
 
         descriptor = WRAPPER._open_verified_path(
             replaceable,
-            self.policy["read_roots"],
+            (self.policy["allowed_root"],),
             "file",
         )
         try:
@@ -187,7 +258,7 @@ class ReadonlyWrapperTest(unittest.TestCase):
 
         descriptor = WRAPPER._open_verified_path(
             replaceable,
-            self.policy["scan_roots"],
+            (self.policy["allowed_root"],),
             "directory",
         )
         try:
@@ -227,8 +298,7 @@ class ReadonlyWrapperTest(unittest.TestCase):
                 None,
             ),
             (
-                "find %s -mindepth 1 -maxdepth 1 -type f -printf '%%f\\n'"
-                % shlex_quote(self.scan_root),
+                "find %s -mindepth 1 -maxdepth 1 -type f -printf '%%f\\n'" % shlex_quote(self.scan_root),
                 b"child.txt\n",
             ),
         )

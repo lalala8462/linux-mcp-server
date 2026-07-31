@@ -2,13 +2,20 @@
 
 import json
 
+from datetime import datetime
+from datetime import timezone
+
 from fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
 from linux_mcp_server.audit import log_tool_call
 from linux_mcp_server.commands import get_command
 from linux_mcp_server.commands import get_command_group
+from linux_mcp_server.compatibility import parse_df_posix
 from linux_mcp_server.compatibility import parse_findmnt_pairs
+from linux_mcp_server.connection.ssh import execute_command
+from linux_mcp_server.host_registry import get_host_capability
+from linux_mcp_server.host_registry import get_managed_profile
 from linux_mcp_server.models import CpuInfo
 from linux_mcp_server.models import DiskUsage
 from linux_mcp_server.models import SystemInfo
@@ -38,6 +45,35 @@ async def get_system_information(
     Retrieves hostname, OS name/version, kernel version, architecture,
     system uptime, and last boot time.
     """
+    capability = get_host_capability(host, "get_system_information")
+    if capability is not None and capability.backend == "centos6_procfs":
+        profile = get_managed_profile(str(host))
+        if profile is None:
+            raise ToolError("Managed CentOS 6 profile is unavailable")
+        hostname_rc, hostname, _ = await execute_command(("hostname",), host=host)
+        uptime_rc, uptime_raw, _ = await execute_command(("cat", "/proc/uptime"), host=host)
+        stat_rc, stat_raw, _ = await execute_command(("cat", "/proc/stat"), host=host)
+        if hostname_rc or uptime_rc or stat_rc:
+            raise ToolError(f"Unable to retrieve CentOS 6 system information from {host}")
+        hostname = hostname.decode("utf-8", errors="replace") if isinstance(hostname, bytes) else hostname
+        uptime_raw = uptime_raw.decode("utf-8", errors="replace") if isinstance(uptime_raw, bytes) else uptime_raw
+        stat_raw = stat_raw.decode("utf-8", errors="replace") if isinstance(stat_raw, bytes) else stat_raw
+        try:
+            uptime = f"{int(float(uptime_raw.split()[0]))} seconds"
+            boot_epoch = next(int(line.split()[1]) for line in stat_raw.splitlines() if line.startswith("btime "))
+            boot_time = datetime.fromtimestamp(boot_epoch, timezone.utc).isoformat()
+        except (IndexError, StopIteration, ValueError) as error:
+            raise ToolError(f"Unable to parse CentOS 6 procfs system information from {host}") from error
+        return SystemInfo(
+            hostname=hostname.strip(),
+            os_name=f"CentOS release {profile.os.version}",
+            os_version=profile.os.version,
+            kernel=profile.os.kernel,
+            arch=profile.os.architecture,
+            uptime=uptime,
+            boot_time=boot_time,
+        )
+
     group = get_command_group("system_info")
     results = {}
 
@@ -138,6 +174,8 @@ async def get_disk_usage(
         if variant in {"primary", "native_json"}:
             data = json.loads(stdout)
             return DiskUsage.model_validate(data)
+        if variant == "centos6_df":
+            return parse_df_posix(stdout)
         return parse_findmnt_pairs(stdout)
     except (json.JSONDecodeError, ValueError) as e:
         raise ToolError(f"Error parsing disk usage information: {str(e)}") from e
@@ -176,4 +214,7 @@ async def get_hardware_information(
         except Exception as e:
             raise ToolError(f"Error gathering hardware information: {str(e)}") from e
 
+    capability = get_host_capability(host, "get_hardware_information")
+    if capability is not None and capability.status == "partial":
+        results["compatibility"] = f"PARTIAL: {capability.reason}"
     return results

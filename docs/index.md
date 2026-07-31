@@ -26,7 +26,7 @@ A Model Context Protocol (MCP) server for read-only Linux system administration,
         "Linux Tools": {
           "command": "/home/YOUR_USER/.local/bin/linux-mcp-server",
           "env": {
-            "LINUX_MCP_ALLOWED_LOG_PATHS": "/var/log/messages,/var/log/lastlog"
+            "LINUX_MCP_ALLOWED_ROOTS": "/var/log"
           }
         }
       }

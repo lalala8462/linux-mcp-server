@@ -58,10 +58,10 @@ Thumbs.db
 # Configuration files (user-specific)
 config.sh
 config/centos-policy.local.json
+config/centos-policies/
 
 .claude/settings.local.json
 CLAUDE.local.md
 
 # Eval data
 eval/gatekeeper/data/
-

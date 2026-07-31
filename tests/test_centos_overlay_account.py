@@ -1,14 +1,17 @@
 # -*- coding: utf-8 -*-
 from __future__ import print_function
 
+import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(ROOT, "scripts", "centos", "install-readonly-account.sh")
+WRAPPER = os.path.join(ROOT, "scripts", "centos", "linux-mcp-readonly.py")
 
 
 class InstallReadonlyAccountTest(unittest.TestCase):
@@ -74,6 +77,12 @@ done
 cp "$source" "$target"
 """,
         )
+        self._write_command(
+            "ssh-keygen",
+            """#!/bin/sh
+printf '%s SHA256:fake key\\n' "${FAKE_KEY_BITS:-4096}"
+""",
+        )
 
     def tearDown(self):
         self.temp_dir.cleanup()
@@ -119,6 +128,59 @@ cp "$source" "$target"
 
     def test_script_has_valid_bash_syntax(self):
         subprocess.check_call(["bash", "-n", SCRIPT])
+
+    def test_policy_validator_declares_utf8_for_python2(self):
+        with open(SCRIPT, encoding="utf-8") as handle:
+            script = handle.read()
+        self.assertIn(
+            "<<'PY'\n# -*- coding: utf-8 -*-\nfrom __future__ import print_function",
+            script,
+        )
+
+    def test_wrapper_runtime_preflight_accepts_forced_command_lookup(self):
+        result = self._run_function("validate_wrapper_runtime", WRAPPER, sys.executable)
+
+        self.assertEqual(0, result.returncode, result.stderr.decode("utf-8"))
+
+    def test_wrapper_runtime_preflight_checks_safe_open_error_formatting(self):
+        with open(SCRIPT, encoding="utf-8") as handle:
+            script = handle.read()
+
+        self.assertIn('wrapper._open_verified_path(', script)
+        self.assertIn('rendered.startswith(u"无法安全打开目标：")', script)
+
+    def test_wrapper_runtime_preflight_rejects_syntax_errors(self):
+        wrapper = os.path.join(self.temp_dir.name, "invalid-wrapper.py")
+        with open(wrapper, "w", encoding="utf-8") as handle:
+            handle.write("def invalid(:\n")
+
+        result = self._run_function("validate_wrapper_runtime", wrapper, sys.executable)
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("运行时自检失败", result.stderr.decode("utf-8"))
+
+    def test_wrapper_runtime_preflight_rejects_unexpected_output(self):
+        wrapper = os.path.join(self.temp_dir.name, "invalid-output.py")
+        with open(wrapper, "w", encoding="utf-8") as handle:
+            handle.write("print('tail')\n")
+
+        result = self._run_function("validate_wrapper_runtime", wrapper, sys.executable)
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("命令定位结果无效", result.stderr.decode("utf-8"))
+
+    def test_wrapper_runtime_preflight_runs_before_active_file_changes(self):
+        with open(SCRIPT, encoding="utf-8") as handle:
+            script = handle.read()
+
+        preflight = script.index('validate_wrapper_runtime "${WRAPPER_SOURCE}"')
+        backup = script.index("backup_existing_files", preflight)
+        wrapper_install = script.index(
+            'install -o root -g root -m 0755 "${WRAPPER_SOURCE}" "${WRAPPER_TARGET}"',
+            preflight,
+        )
+        self.assertLess(preflight, backup)
+        self.assertLess(preflight, wrapper_install)
 
     def test_accepts_dedicated_account_with_only_allowed_groups(self):
         result = self._run_function("validate_existing_account", "codex-ro")
@@ -179,6 +241,73 @@ cp "$source" "$target"
         )
         self.assertNotEqual(0, result.returncode)
         self.assertIn("不能改用", result.stderr.decode("utf-8"))
+
+    def test_policy_requires_one_safe_allowed_root(self):
+        policy = os.path.join(self.temp_dir.name, "policy.json")
+        with open(policy, "w", encoding="utf-8") as handle:
+            json.dump({"allowed_root": self.temp_dir.name}, handle)
+        valid = self._run_function("validate_policy_file", policy)
+        self.assertEqual(0, valid.returncode, valid.stderr.decode("utf-8"))
+
+        with open(policy, "w", encoding="utf-8") as handle:
+            json.dump({"read_roots": [self.temp_dir.name]}, handle)
+        legacy = self._run_function("validate_policy_file", policy)
+        self.assertNotEqual(0, legacy.returncode)
+
+        with open(policy, "w", encoding="utf-8") as handle:
+            json.dump({"allowed_root": "/"}, handle)
+        root = self._run_function("validate_policy_file", policy)
+        self.assertNotEqual(0, root.returncode)
+
+    def test_rsa_requires_explicit_flag_and_4096_bits(self):
+        public_key = os.path.join(self.temp_dir.name, "id_rsa.pub")
+        with open(public_key, "w", encoding="ascii") as handle:
+            handle.write("ssh-rsa QUFBQUFBQUFBQUFBQUFBQUFB linux-mcp\n")
+
+        denied = self._run_function("validate_public_key", public_key, "false")
+        self.assertNotEqual(0, denied.returncode)
+        self.assertIn("--allow-rsa", denied.stderr.decode("utf-8"))
+
+        accepted = self._run_function("validate_public_key", public_key, "true")
+        self.assertEqual(0, accepted.returncode, accepted.stderr.decode("utf-8"))
+
+        wrong_size = self._run_function(
+            "validate_public_key",
+            public_key,
+            "true",
+            FAKE_KEY_BITS="2048",
+        )
+        self.assertNotEqual(0, wrong_size.returncode)
+        self.assertIn("4096", wrong_size.stderr.decode("utf-8"))
+
+    def test_ed25519_key_must_parse_as_256_bits(self):
+        public_key = os.path.join(self.temp_dir.name, "id_ed25519.pub")
+        with open(public_key, "w", encoding="ascii") as handle:
+            handle.write("ssh-ed25519 QUFBQUFBQUFBQUFBQUFBQUFB linux-mcp\n")
+
+        accepted = self._run_function(
+            "validate_public_key",
+            public_key,
+            "false",
+            FAKE_KEY_BITS="256",
+        )
+        self.assertEqual(0, accepted.returncode, accepted.stderr.decode("utf-8"))
+
+        malformed = self._run_function(
+            "validate_public_key",
+            public_key,
+            "false",
+            FAKE_KEY_BITS="0",
+        )
+        self.assertNotEqual(0, malformed.returncode)
+
+    def test_dsa_is_always_rejected(self):
+        public_key = os.path.join(self.temp_dir.name, "id_dsa.pub")
+        with open(public_key, "w", encoding="ascii") as handle:
+            handle.write("ssh-dss QUFBQUFBQUFBQUFBQUFBQUFB linux-mcp\n")
+        result = self._run_function("validate_public_key", public_key, "true")
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("DSA", result.stderr.decode("utf-8"))
 
     def test_backup_copies_existing_files_once_without_overwrite(self):
         wrapper = os.path.join(self.temp_dir.name, "wrapper.py")

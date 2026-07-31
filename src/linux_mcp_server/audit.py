@@ -14,6 +14,11 @@ import typing as t
 from contextlib import contextmanager
 from datetime import timedelta
 
+from fastmcp.exceptions import ToolError
+
+from linux_mcp_server.config import CONFIG
+from linux_mcp_server.host_registry import get_managed_profile
+from linux_mcp_server.host_registry import MANAGED_TOOL_NAMES
 from linux_mcp_server.utils import StrEnum
 
 
@@ -184,6 +189,39 @@ def _log_event_complete(
         logger.info(message, extra=extra)
 
 
+def _require_managed_capability(
+    func: t.Callable,
+    tool_name: str,
+    args: tuple[t.Any, ...],
+    kwargs: dict[str, t.Any],
+) -> None:
+    bound = inspect.signature(func).bind_partial(*args, **kwargs)
+    bound.apply_defaults()
+    host = bound.arguments.get("host")
+    if tool_name not in MANAGED_TOOL_NAMES:
+        if host is None:
+            if CONFIG.require_managed_host:
+                raise ToolError("Managed-host mode does not permit local or unprofiled tools")
+            return
+        try:
+            profile = get_managed_profile(str(host))
+        except RuntimeError as error:
+            raise ToolError(str(error)) from error
+        if profile is not None:
+            raise ToolError(f"Managed host '{profile.alias}' does not permit tool '{tool_name}'")
+        return
+    if host is None:
+        if CONFIG.require_managed_host:
+            raise ToolError("Managed-host mode requires an exact registered host alias")
+        return
+    try:
+        profile = get_managed_profile(str(host))
+        if profile is not None:
+            profile.require_tool(tool_name)
+    except RuntimeError as error:
+        raise ToolError(str(error)) from error
+
+
 def log_tool_call(func: t.Callable) -> Function:
     """Decorator to log tool calls
 
@@ -199,6 +237,7 @@ def log_tool_call(func: t.Callable) -> Function:
         result = None
 
         try:
+            _require_managed_capability(func, tool_name, args, kwargs)
             result = func(*args, **kwargs)
         except Exception as exc:
             error = exc
@@ -216,6 +255,7 @@ def log_tool_call(func: t.Callable) -> Function:
         result = None
 
         try:
+            _require_managed_capability(func, tool_name, args, kwargs)
             result = await func(*args, **kwargs)
         except Exception as exc:
             error = exc

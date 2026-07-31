@@ -60,7 +60,7 @@ The inspector provides a web UI where you can:
    sudo usermod -a -G systemd-journal $USER
    ```
 2. Log out and log back in for group changes to take effect
-3. Only whitelist log files that the user can read in `LINUX_MCP_ALLOWED_LOG_PATHS`
+3. Only approve roots that the user can read in `LINUX_MCP_ALLOWED_ROOTS`
 
 ### "Permission denied" when reading a local application log file
 

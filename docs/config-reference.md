@@ -38,6 +38,8 @@ To see available options, run `linux-mcp-server --help`.
 |------------------|---------|-------------|
 | `--verify-host-keys` / `--no-verify-host-keys`<br>`LINUX_MCP_VERIFY_HOST_KEYS` | `True` | Verify remote host identity via known_hosts |
 | `--known-hosts-path`<br>`LINUX_MCP_KNOWN_HOSTS_PATH` | *(none)* | Custom path to known_hosts file |
+| `--host-registry-path`<br>`LINUX_MCP_HOST_REGISTRY_PATH` | *(none)* | Directory containing per-alias `profile.json`, private key, and `known_hosts` |
+| `--require-managed-host`<br>`LINUX_MCP_REQUIRE_MANAGED_HOST` | `false` | Reject local execution and aliases absent from the managed host registry |
 
 See [SSH Configuration](ssh.md) for details on setting up SSH connections and managing host keys.
 
@@ -46,7 +48,7 @@ See [SSH Configuration](ssh.md) for details on setting up SSH connections and ma
 | Option / Env Var | Default | Description |
 |------------------|---------|-------------|
 | `--toolset`<br>`LINUX_MCP_TOOLSET` | `fixed` | Toolset: `fixed`, `run_script`, or `both` |
-| `--allowed-log-paths`<br>`LINUX_MCP_ALLOWED_LOG_PATHS` | *(none)* | Comma-separated allowlist of log file paths for `read_log_file` |
+| `--allowed-roots`<br>`LINUX_MCP_ALLOWED_ROOTS` | *(none)* | Comma-separated approved directory roots for `read_log_file` |
 | `--max-file-read-bytes`<br>`LINUX_MCP_MAX_FILE_READ_BYTES` | `1048576` | Maximum bytes `read_file` may return |
 
 See [Guarded Command Execution](guarded-command-execution.md) for details on the `run_script` toolset.
@@ -183,7 +185,7 @@ linux-mcp-server --allowed-log-paths "/var/log/messages,/var/log/secure,/var/log
 {
   "env": {
     "LINUX_MCP_USER": "admin",
-    "LINUX_MCP_ALLOWED_LOG_PATHS": "/var/log/messages,/var/log/secure",
+    "LINUX_MCP_ALLOWED_ROOTS": "/var/log",
     "LINUX_MCP_LOG_LEVEL": "DEBUG"
   }
 }

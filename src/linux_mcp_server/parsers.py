@@ -4,6 +4,8 @@ This module provides functions to parse raw command output into
 structured data that can be used by formatters.
 """
 
+import re
+
 from pathlib import Path
 
 from linux_mcp_server.models import CpuInfo
@@ -278,6 +280,75 @@ def parse_ip_brief(stdout: str) -> dict[str, NetworkInterface]:
             )
 
     return interfaces
+
+
+def parse_ip_address(stdout: str) -> dict[str, NetworkInterface]:
+    """Parse the stable portions of legacy ``ip address`` output."""
+
+    interfaces: dict[str, NetworkInterface] = {}
+    current_name = ""
+    for line in stdout.splitlines():
+        match = re.match(r"^\d+:\s+([^:]+):\s+<[^>]*>.*\bstate\s+(\S+)", line)
+        if match:
+            current_name = match.group(1)
+            interfaces[current_name] = NetworkInterface(
+                name=current_name,
+                status=match.group(2),
+                addresses=[],
+            )
+            continue
+        stripped = line.strip()
+        if current_name and (stripped.startswith("inet ") or stripped.startswith("inet6 ")):
+            address = stripped.split()[1]
+            interfaces[current_name].addresses.append(address)
+    return interfaces
+
+
+def parse_netstat_connections(stdout: str) -> list[NetworkConnection]:
+    """Parse fixed ``netstat -tunap`` output used on older CentOS."""
+
+    connections = []
+    for line in stdout.splitlines():
+        parts = line.split()
+        if not parts or parts[0] not in {"tcp", "tcp6", "udp", "udp6"} or len(parts) < 6:
+            continue
+        protocol = parts[0].upper()
+        local = parts[3]
+        remote = parts[4]
+        state_index = 5 if protocol.startswith("TCP") else None
+        process_index = 6 if state_index is not None else 5
+        local_address, _, local_port = local.rpartition(":")
+        remote_address, _, remote_port = remote.rpartition(":")
+        connections.append(
+            NetworkConnection(
+                protocol=protocol,
+                state=parts[state_index] if state_index is not None else "UNCONN",
+                local_address=local_address,
+                local_port=local_port,
+                remote_address=remote_address,
+                remote_port=remote_port,
+                process=parts[process_index] if len(parts) > process_index else "",
+            )
+        )
+    return connections
+
+
+def parse_netstat_listening(stdout: str) -> list[ListeningPort]:
+    """Parse listening sockets from fixed ``netstat -tulnp`` output."""
+
+    ports = []
+    for connection in parse_netstat_connections(stdout):
+        if connection.protocol.startswith("TCP") and connection.state != "LISTEN":
+            continue
+        ports.append(
+            ListeningPort(
+                protocol=connection.protocol,
+                local_address=connection.local_address,
+                local_port=connection.local_port,
+                process=connection.process,
+            )
+        )
+    return ports
 
 
 def parse_system_info(results: dict[str, str]) -> SystemInfo:

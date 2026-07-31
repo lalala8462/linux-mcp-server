@@ -10,14 +10,15 @@ When [Guarded Command Execution](guarded-command-execution.md) is enabled, the s
 
 ## Log File Access Control
 
-The `read_log_file` tool uses a whitelist approach. Only files explicitly listed in `LINUX_MCP_ALLOWED_LOG_PATHS` can be accessed.
+The `read_log_file` tool checks approved directory roots. Only files below a root
+listed in `LINUX_MCP_ALLOWED_ROOTS` can be accessed.
 
 ```bash
-# Only allow reading these specific log files
-LINUX_MCP_ALLOWED_LOG_PATHS="/var/log/messages,/var/log/secure,/var/log/audit/audit.log"
+# Allow log files below these roots
+LINUX_MCP_ALLOWED_ROOTS="/var/log,/opt/your-project/logs"
 ```
 
-If `LINUX_MCP_ALLOWED_LOG_PATHS` is not set, the `read_log_file` tool cannot read any files.
+If `LINUX_MCP_ALLOWED_ROOTS` is not set, the `read_log_file` tool cannot read any files.
 
 ## Privileged Information
 
@@ -37,7 +38,7 @@ Use an account on the target machine with the minimum required privileges. See [
    sudo usermod -a -G systemd-journal $USER
    ```
 2. Log out and log back in for group changes to take effect
-3. Carefully curate the `LINUX_MCP_ALLOWED_LOG_PATHS` list to include only necessary files
+3. Carefully curate the `LINUX_MCP_ALLOWED_ROOTS` list to include only necessary roots
 
 ## SSH Security
 

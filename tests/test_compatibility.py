@@ -2,6 +2,7 @@
 
 import pytest
 
+from linux_mcp_server.compatibility import parse_df_posix
 from linux_mcp_server.compatibility import parse_findmnt_pairs
 from linux_mcp_server.compatibility import parse_lsblk_pairs
 from linux_mcp_server.compatibility import parse_os_release
@@ -52,6 +53,16 @@ def test_parse_findmnt_pairs():
 def test_parse_findmnt_pairs_requires_all_fields():
     with pytest.raises(ValueError, match="Missing findmnt fields"):
         parse_findmnt_pairs(r'SOURCE="/dev/sda1" TARGET="/"')
+
+
+def test_parse_centos6_df_output():
+    result = parse_df_posix(
+        "Filesystem 1B-blocks Used Available Use% Mounted on\n/dev/sda1 1000000 250000 750000 25% /\n"
+    )
+
+    assert result.filesystems[0].source == "/dev/sda1"
+    assert result.filesystems[0].size == "1000000"
+    assert result.filesystems[0].target == "/"
 
 
 def test_parse_lsblk_pairs_builds_parent_tree():

@@ -12,6 +12,7 @@ from pydantic.functional_validators import BeforeValidator
 from linux_mcp_server.audit import log_tool_call
 from linux_mcp_server.commands import get_command
 from linux_mcp_server.config import CONFIG
+from linux_mcp_server.host_registry import get_host_allowed_root
 from linux_mcp_server.models import LogEntries
 from linux_mcp_server.server import mcp
 from linux_mcp_server.utils import StrEnum
@@ -153,7 +154,7 @@ async def read_log_file(
         Path,
         BeforeValidator(validate_path),
         Field(
-            description="Absolute path to the log file (must be in allowed list)",
+            description="Absolute path to the log file (must be below an allowed root)",
             examples=["/var/log/messages", "/var/log/secure", "/var/log/audit/audit.log", "/var/log/dnf.log"],
         ),
     ],
@@ -162,32 +163,30 @@ async def read_log_file(
 ) -> LogEntries:
     """Read a specific log file.
 
-    Retrieves the last N lines from a log file. The file path must be in the
-    allowed list configured via LINUX_MCP_ALLOWED_LOG_PATHS environment variable.
+    Retrieves the last N lines from a log file. The file path must be below an
+    allowed root configured via LINUX_MCP_ALLOWED_ROOTS.
     """
-    # Get allowed log paths from environment variable
-    allowed_paths_env = CONFIG.allowed_log_paths
+    managed_root = get_host_allowed_root(host)
+    allowed_roots_env = CONFIG.allowed_roots
 
-    if not allowed_paths_env:
+    if managed_root is not None:
+        allowed_roots = [managed_root]
+    elif allowed_roots_env:
+        allowed_roots = [Path(root.strip()) for root in allowed_roots_env.split(",") if root.strip()]
+    else:
         raise ToolError(
-            "No log files are allowed. Set LINUX_MCP_ALLOWED_LOG_PATHS environment variable "
-            "with comma-separated list of allowed log file paths."
+            "No log roots are allowed. Set LINUX_MCP_ALLOWED_ROOTS environment variable "
+            "with comma-separated list of allowed directory roots."
         )
 
-    allowed_paths = [Path(p.strip()) for p in allowed_paths_env.split(",") if p.strip()]
+    def is_within_root(path: Path, roots: list[Path]) -> bool:
+        return any(path == root or root in path.parents for root in roots)
 
     if not host:
-        # For local execution, resolve and check against allowlist
+        # For local execution, resolve before checking containment.
         requested_path = log_path.resolve()
-
-        is_allowed = False
-        for allowed_path in allowed_paths:
-            allowed_resolved = Path(allowed_path).resolve()
-            if requested_path == allowed_resolved:
-                is_allowed = True
-                break
-
-        if not is_allowed:
+        allowed_resolved_roots = [root.resolve() for root in allowed_roots]
+        if not is_within_root(requested_path, allowed_resolved_roots):
             raise ToolError(f"Access to log file '{log_path}' is not allowed.")
 
         if not requested_path.exists():
@@ -198,8 +197,9 @@ async def read_log_file(
 
         log_path_str = str(requested_path)
     else:
-        # For remote execution, check against allowlist without resolving
-        if log_path not in allowed_paths:
+        # Remote paths cannot be resolved locally. Reject traversal and perform
+        # lexical containment here; the ForceCommand validates the real path.
+        if ".." in log_path.parts or not is_within_root(log_path, allowed_roots):
             raise ToolError(f"Access to log file '{log_path}' is not allowed.")
 
         log_path_str = str(log_path)

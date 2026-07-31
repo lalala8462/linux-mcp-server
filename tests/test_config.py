@@ -12,6 +12,19 @@ from pydantic import ValidationError
 from linux_mcp_server.config import Config
 
 
+def test_codex_wsl_template_forwards_all_mcp_environment_variables():
+    template = (Path(__file__).parents[1] / "config" / "codex-mcp-snippet.toml").read_text(encoding="utf-8")
+    wslenv_line = next(line for line in template.splitlines() if line.startswith("WSLENV = "))
+    forwarded = set(wslenv_line.split('"', 2)[1].split(":"))
+    configured = {
+        line.split("=", 1)[0].strip()
+        for line in template.split("[mcp_servers.linux-centos-ro.env]", 1)[1].splitlines()
+        if line.strip() and not line.lstrip().startswith("#") and not line.startswith("WSLENV")
+    }
+
+    assert forwarded == configured
+
+
 class TestConfig:
     """Test cases for Config class"""
 
@@ -23,7 +36,7 @@ class TestConfig:
             log_dir=Path("/var/log/custom"),
             log_level="DEBUG",
             log_retention_days=30,
-            allowed_log_paths="/var/log:/tmp",
+            allowed_roots="/var/log:/tmp",
             max_file_read_bytes=2 * 1024 * 1024,
             ssh_key_path=Path("/home/user/.ssh/id_rsa"),
             key_passphrase=SecretStr("secret"),
@@ -34,7 +47,7 @@ class TestConfig:
         assert config.log_dir == Path("/var/log/custom")
         assert config.log_level == "DEBUG"
         assert config.log_retention_days == 30
-        assert config.allowed_log_paths == "/var/log:/tmp"
+        assert config.allowed_roots == "/var/log:/tmp"
         assert config.max_file_read_bytes == 2 * 1024 * 1024
         assert config.ssh_key_path == Path("/home/user/.ssh/id_rsa")
         assert config.key_passphrase.get_secret_value() == "secret"
@@ -80,6 +93,15 @@ class TestConfig:
 
         assert config.ssh_key_path == Path("/home/user/.ssh/custom_key")
 
+    def test_managed_host_registry_environment(self, mock_getuser, monkeypatch):
+        monkeypatch.setenv("LINUX_MCP_HOST_REGISTRY_PATH", "/var/lib/linux-mcp/hosts")
+        monkeypatch.setenv("LINUX_MCP_REQUIRE_MANAGED_HOST", "true")
+
+        config = Config()
+
+        assert config.host_registry_path == Path("/var/lib/linux-mcp/hosts")
+        assert config.require_managed_host is True
+
     def test_env_var_override_key_passphrase(self, mock_getuser, monkeypatch):
         """Test that LINUX_MCP_KEY_PASSPHRASE environment variable works"""
         monkeypatch.setenv("LINUX_MCP_KEY_PASSPHRASE", "my_secret_passphrase")
@@ -96,13 +118,13 @@ class TestConfig:
 
         assert config.search_for_ssh_key is True
 
-    def test_env_var_override_allowed_log_paths(self, mock_getuser, monkeypatch):
-        """Test that LINUX_MCP_ALLOWED_LOG_PATHS environment variable works"""
-        monkeypatch.setenv("LINUX_MCP_ALLOWED_LOG_PATHS", "/var/log:/tmp:/home/logs")
+    def test_env_var_override_allowed_roots(self, mock_getuser, monkeypatch):
+        """Test that LINUX_MCP_ALLOWED_ROOTS environment variable works"""
+        monkeypatch.setenv("LINUX_MCP_ALLOWED_ROOTS", "/var/log:/tmp:/home/logs")
 
         config = Config()
 
-        assert config.allowed_log_paths == "/var/log:/tmp:/home/logs"
+        assert config.allowed_roots == "/var/log:/tmp:/home/logs"
 
     def test_env_var_override_max_file_read_bytes(self, mock_getuser, monkeypatch):
         """Test that LINUX_MCP_MAX_FILE_READ_BYTES environment variable works"""
@@ -210,11 +232,11 @@ class TestConfigEdgeCases:
         """Test that optional fields can be None"""
 
         config = Config(
-            allowed_log_paths=None,
+            allowed_roots=None,
             ssh_key_path=None,
         )
 
-        assert config.allowed_log_paths is None
+        assert config.allowed_roots is None
         assert config.ssh_key_path is None
 
     def test_empty_string_log_level_validation(self, mock_getuser):

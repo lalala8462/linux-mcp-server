@@ -15,6 +15,7 @@ from linux_mcp_server.commands import CommandSpec
 from linux_mcp_server.commands import get_command
 from linux_mcp_server.compatibility import parse_lsblk_pairs
 from linux_mcp_server.config import CONFIG
+from linux_mcp_server.host_registry import get_host_allowed_root
 from linux_mcp_server.models import BlockDevices
 from linux_mcp_server.models import NodeEntry
 from linux_mcp_server.models import StorageNodes
@@ -38,6 +39,12 @@ class OrderBy(StrEnum):
 class SortBy(StrEnum):
     ASCENDING = "ascending"
     DESCENDING = "descending"
+
+
+def _require_managed_path(path: Path, host: Host | None) -> None:
+    root = get_host_allowed_root(host)
+    if root is not None and path != root and root not in path.parents:
+        raise ToolError(f"Path is outside the managed allowed_root for host '{host}': {path}")
 
 
 def attr_sorter(order_by: OrderBy):
@@ -138,6 +145,7 @@ async def list_directories(
     Retrieves subdirectories with their size (when ordered by size) or
     modification time, supporting flexible sorting and result limiting.
     """
+    _require_managed_path(path, host)
     return await _list_resources(
         path=path,
         command=get_command(f"list_directories_{order_by}"),
@@ -183,6 +191,7 @@ async def list_files(
     Retrieves files with their size or modification time, supporting flexible
     sorting and result limiting. Useful for finding large or recently modified files.
     """
+    _require_managed_path(path, host)
     return await _list_resources(
         path=path,
         command=get_command(f"list_files_{order_by}"),
@@ -219,6 +228,7 @@ async def read_file(
     configured safety limit. The path must be absolute, must refer to a
     regular file, and binary files may not display correctly.
     """
+    _require_managed_path(path, host)
     limit = CONFIG.max_file_read_bytes
     limit_text = format_bytes(limit)
 
