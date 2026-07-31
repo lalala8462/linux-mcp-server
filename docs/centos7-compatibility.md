@@ -1,21 +1,25 @@
 # CentOS 7 compatibility
 
-Version `1.5.0+centos7.1` preserves the upstream fixed tool set and adds
-read-only command variants for older util-linux and procps-ng releases.
+这是基于 `rhel-lightspeed/linux-mcp-server` 维护的只读 Linux 运维诊断版本，主要增加了 CentOS 6/7 等旧系统的兼容能力，并提供 Windows、WSL 与远程 Linux 服务器之间的受控访问流程。
 
-When a new SSH connection is established, the server probes fixed command
-shapes for:
+MCP 主程序运行在 WSL 中，由 WSL 统一管理远程服务器别名、SSH 密钥、主机指纹和访问策略。远程服务器不需要安装完整 MCP 服务，只需要部署专用的 `codex-ro` 账号及只读命令包装器。
 
-- `findmnt --df --json`, falling back to `findmnt -D -P`;
-- `lsblk --json`, falling back to `lsblk -P`, with an optional `PKNAME`
-  hierarchy;
-- `free -b -w`, falling back to `free -b`.
+## 工作流程
 
-The probe rejects timeouts and permission failures instead of treating them as
-platform incompatibilities. Selected fallback commands are recorded through a
-structured `COMPAT_FALLBACK` audit event containing the host, OS version,
-kernel, package version, capability, and variant. Command output is not included
-in the event.
+1. Codex Desktop 启动部署在 WSL 中的 Linux MCP Server。
+2. 使用者选择一个已经登记的远程服务器别名。
+3. MCP 使用该服务器独立的 SSH 私钥连接远程 `codex-ro` 账号。
+4. 远程服务器通过 `authorized_keys` 中的公钥完成认证，并强制将请求交给只读命令包装器，不能进入交互式 Shell。
+5. 包装器只允许预先定义的系统、服务、进程、网络、磁盘、文件和日志查询命令，并校验命令参数及允许访问的目录。
+6. 查询结果通过 SSH 返回 WSL，再由 MCP 提供给 Codex。
+7. 安装、卸载或账号清理等需要修改服务器的操作，由本地生成部署包和管理员命令，交给服务器管理员人工审核、执行。
 
-The remote SSH account must still enforce a root-owned fixed-command allowlist.
-This fork does not enable arbitrary shell or `run_script` execution.
+## 安全边界
+
+- 默认只启用 19 个固定只读工具，不开放任意 Shell 或 `run_script`。
+- 不使用或保存服务器登录密码、sudo 密码。
+- SSH 私钥只保存在 WSL，远程服务器和仓库中只放公钥。
+- 每台服务器使用独立密钥、主机指纹和受管别名。
+- 未登记的主机默认拒绝访问。
+- 文件和日志只能读取管理员批准的单个目录范围，不能配置为根目录 `/`。
+- CentOS 6 使用兼容 Python 2.6 的远端包装器，并在显式批准后使用 RSA 4096；CentOS 7/8/Stream 默认使用 Ed25519。
