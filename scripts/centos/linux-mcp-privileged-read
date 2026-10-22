@@ -1,4 +1,4 @@
-#!/usr/bin/python -Es
+#!/usr/bin/python -BEs
 # -*- coding: utf-8 -*-
 """只接受固定 JSON 读取请求的 root helper，兼容 Python 2.6/3.x。"""
 
