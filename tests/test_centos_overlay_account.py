@@ -121,6 +121,28 @@ printf '%s SHA256:fake key\\n' "${FAKE_KEY_BITS:-4096}"
         result = self._run_function("validate_helper_runtime", helper, sys.executable)
         self.assertEqual(0, result.returncode, result.stderr.decode("utf-8"))
 
+    def test_no_sudo_authorization_accepts_legacy_success_exit_only_for_exact_denial(self):
+        denial = "User codex-ro is not allowed to run sudo on test-host."
+        for status in ("0", "1"):
+            with self.subTest(status=status):
+                result = self._run_function(
+                    "validate_existing_account", "codex-ro", FAKE_SUDO_STATUS=status,
+                    FAKE_SUDO_LISTING=denial,
+                )
+                self.assertEqual(0, result.returncode, result.stderr.decode("utf-8"))
+        for status, listing in (
+            ("2", denial),
+            ("0", "User another-user is not allowed to run sudo on test-host."),
+            ("0", denial + "\nUser codex-ro may run the following commands on test-host:\n    (ALL) ALL"),
+            ("0", "sudo: a terminal is required"),
+        ):
+            with self.subTest(status=status, listing=listing):
+                result = self._run_function(
+                    "validate_existing_account", "codex-ro", FAKE_SUDO_STATUS=status,
+                    FAKE_SUDO_LISTING=listing,
+                )
+                self.assertNotEqual(0, result.returncode)
+
     def test_sudoers_restricts_arguments_and_passes_visudo(self):
         output = os.path.join(self.temp_dir.name, "sudoers")
         result = self._run_function("write_sudoers", output)

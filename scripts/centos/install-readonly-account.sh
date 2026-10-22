@@ -63,13 +63,16 @@ validate_existing_account() {
 }
 
 validate_sudo_access() {
-  local account="$1" listing rules
+  local account="$1" listing rules query_status=0
   command -v sudo >/dev/null 2>&1 || fail "未安装 sudo，无法配置受控 helper"
   # 由管理员查询完整授权，不能把 requiretty/认证失败误判为没有 sudo 权限。
-  if ! listing="$(LC_ALL=C sudo -n -l -U "${account}" 2>&1)"; then
-    [[ "${listing}" == *"is not allowed to run sudo"* ]] && return 0
-    fail "无法可靠查询账号 sudo 权限：${account}"
+  listing="$(LC_ALL=C sudo -n -l -U "${account}" 2>&1)" || query_status="$?"
+  # sudo 1.8.6p3 查询其他账号无授权时也可能退出 0；只接受完整单行拒绝信息。
+  if [[ "${query_status}" -le 1 && "${listing}" != *$'\n'* && \
+        "${listing}" == "User ${account} is not allowed to run sudo on "?*. ]]; then
+    return 0
   fi
+  [[ "${query_status}" -eq 0 ]] || fail "无法可靠查询账号 sudo 权限：${account}"
   rules="$(printf '%s\n' "${listing}" | awk '
     /may run the following commands/ { found=1; next }
     found { sub(/^[[:space:]]+/, ""); sub(/[[:space:]]+$/, ""); if (length) print }
