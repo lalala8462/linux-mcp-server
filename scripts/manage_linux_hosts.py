@@ -694,6 +694,21 @@ def classify_verification_failure(rendered: str, *, is_error: bool) -> str:
     return "profile_mismatch"
 
 
+def is_read_boundary_denial(rendered: str, path: str) -> bool:
+    # 排除错误中回显的路径，避免 outside-link 文件名把缺失/权限错误误判为越界拒绝。
+    message = rendered.casefold().replace(path.casefold(), "")
+    return any(
+        reason in message
+        for reason in (
+            "path is outside approved roots",
+            "outside the managed allowed_roots",
+            "路径不在批准范围",
+            "symlinks and special files are not allowed",
+            "opened path changed or contains a symlink",
+        )
+    )
+
+
 def _is_within_posix_root(path: Path, root: str) -> bool:
     raw_path = path.as_posix()
     parsed = PurePosixPath(raw_path)
@@ -812,9 +827,7 @@ async def run_mcp_verification(args: argparse.Namespace, profile: HostProfile) -
                 )
                 rendered = " ".join(getattr(item, "text", "") for item in call.content)
                 failed = call.is_error or rendered.lstrip().casefold().startswith("error ")
-                boundary_error = any(
-                    word in rendered.casefold() for word in ("outside", "symlink", "批准范围", "allowed_root")
-                )
+                boundary_error = is_read_boundary_denial(rendered, str(arguments.get("path", "")))
                 matched = (
                     failed and boundary_error if expected_text is None else not failed and expected_text in rendered
                 )

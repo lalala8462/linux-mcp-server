@@ -453,6 +453,25 @@ def test_privileged_verification_refuses_imported_success(tmp_path):
         )
 
 
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("path is outside approved roots", True),
+        ("Path is outside the managed allowed_roots for host 'server-1': {path}", True),
+        ("路径不在批准范围：{path}", True),
+        ("symlinks and special files are not allowed", True),
+        ("opened path changed or contains a symlink", True),
+        ("读取目标不是普通文件：{path}", False),
+        ("Permission denied: {path}", False),
+        ("No such file or directory: {path}", False),
+        ("Connection lost while reading {path}", False),
+    ],
+)
+def test_boundary_denial_requires_explicit_reason(message, expected):
+    path = "/data/.linux-mcp-verify/outside-link"
+    assert MANAGER.is_read_boundary_denial(message.format(path=path), path) is expected
+
+
 async def test_verification_server_exposes_only_nineteen_readonly_tools(mcp_client):
     tools = await mcp_client.list_tools()
     assert {tool.name for tool in tools} == MANAGED_TOOL_NAMES
