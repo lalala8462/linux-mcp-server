@@ -17,6 +17,17 @@ async def test_path_validation_rejects_injection_characters(path, expected_error
         await mcp_client.call_tool("read_file", arguments={"path": path})
 
 
+async def test_remote_boundary_error_preserves_unicode_reason(mock_execute_with_fallback, mcp_client):
+    mock_execute_with_fallback.side_effect = [
+        (0, "19", ""),
+        (126, "", "拒绝：路径不在批准范围：/data/.linux-mcp-verify/outside-link"),
+    ]
+    with pytest.raises(ToolError, match="拒绝：路径不在批准范围"):
+        await mcp_client.call_tool(
+            "read_file", arguments={"path": "/data/.linux-mcp-verify/outside-link", "host": "remote.host"}
+        )
+
+
 def test_managed_path_accepts_each_profile_root_and_rejects_environment_expansion(mocker):
     mocker.patch.object(
         storage,

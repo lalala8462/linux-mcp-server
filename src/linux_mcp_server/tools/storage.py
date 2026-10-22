@@ -255,7 +255,8 @@ async def read_file(
     returncode, stdout, stderr = await cmd.run_bytes(host=host, path=path, max_bytes=limit + 1)
 
     if returncode != 0:
-        raise ToolError(f"Error running command: command failed with return code {returncode}: {stderr}")
+        error_text = stderr.decode("utf-8", errors="replace")
+        raise ToolError(f"Error running command: command failed with return code {returncode}: {error_text}")
 
     if len(stdout) > limit:
         raise ToolError(f"File is too large (> {limit_text}): {path}")
