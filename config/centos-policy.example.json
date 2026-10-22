@@ -1,5 +1,9 @@
 {
-  "allowed_root": "/opt/your-project",
+  "read_mode": "user",
+  "allowed_roots": [
+    "/opt/your-project",
+    "/var/log/your-project"
+  ],
   "max_file_read_bytes": 1048576,
   "max_log_lines": 10000
 }

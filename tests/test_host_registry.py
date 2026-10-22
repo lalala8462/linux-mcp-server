@@ -126,6 +126,8 @@ def test_supported_centos_profiles_contain_exactly_all_tools(tmp_path, major):
     profile = make_profile(tmp_path, major=major)
 
     assert set(profile.capabilities) == MANAGED_TOOL_NAMES
+    assert profile.schema_version == 2
+    assert profile.allowed_roots == ("/data",)
     if major == 6:
         assert profile.ssh.legacy_rsa
         assert profile.capabilities["get_journal_logs"].status == "unsupported"
@@ -167,10 +169,37 @@ def test_profile_rejects_tampered_host_fingerprint(tmp_path):
 
 def test_profile_rejects_allowed_root_traversal(tmp_path):
     profile = make_profile(tmp_path).model_dump(mode="json")
-    profile["allowed_root"] = "/data/../etc"
+    profile["allowed_roots"] = ["/data/../etc"]
 
-    with pytest.raises(ValueError, match="allowed_root"):
+    with pytest.raises(ValueError, match="allowed_roots"):
         HostProfile.model_validate(profile)
+
+
+@pytest.mark.parametrize(
+    "allowed_roots",
+    (
+        [],
+        ["/"],
+        ["/data", "/data"],
+        ["/data", "/data/log"],
+        [f"/root-{index}" for index in range(17)],
+    ),
+)
+def test_profile_rejects_invalid_allowed_roots(tmp_path, allowed_roots):
+    profile = make_profile(tmp_path).model_dump(mode="json")
+    profile["allowed_roots"] = allowed_roots
+
+    with pytest.raises(ValueError, match="allowed_roots"):
+        HostProfile.model_validate(profile)
+
+
+def test_profile_accepts_multiple_disjoint_roots(tmp_path):
+    profile = make_profile(tmp_path).model_dump(mode="json")
+    profile["allowed_roots"] = ["/usr", "/data"]
+
+    loaded = HostProfile.model_validate(profile)
+
+    assert loaded.allowed_roots == ("/data", "/usr")
 
 
 def test_registry_rejects_alias_mismatch(tmp_path):

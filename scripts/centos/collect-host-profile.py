@@ -14,8 +14,10 @@ import subprocess
 import sys
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+MAX_ALLOWED_ROOTS = 16
 MAX_PROBE_BYTES = 1024 * 1024
+CAPABILITY_PROBE_ROOT = os.path.dirname(os.path.realpath(__file__))
 TOOLS = (
     "get_system_information",
     "get_cpu_information",
@@ -230,7 +232,17 @@ def socket_table_ok(args, backend):
     return any(line.startswith("Proto ") for line in lines)
 
 
-def detect_capabilities(os_profile, allowed_root):  # noqa: C901
+def storage_capabilities_ok():
+    find_ok = command_ok(
+        ("find", CAPABILITY_PROBE_ROOT, "-mindepth", "1", "-maxdepth", "1"),
+        require_output=False,
+    )
+    du_ok = command_ok(("du", "-b", "--one-file-system", "--max-depth=0", CAPABILITY_PROBE_ROOT))
+    stat_ok = command_ok(("stat", "--dereference", "--format", "%s", "--", CAPABILITY_PROBE_ROOT))
+    return find_ok, du_ok, stat_ok
+
+
+def detect_capabilities(os_profile):  # noqa: C901
     major = os_profile["major"]
     modern = major >= 7
     result = {}
@@ -374,9 +386,7 @@ def detect_capabilities(os_profile, allowed_root):  # noqa: C901
         "" if block_backend else "no parseable lsblk pairs or JSON output",
     )
 
-    find_ok = command_ok(("find", allowed_root, "-mindepth", "1", "-maxdepth", "1"), require_output=False)
-    du_ok = command_ok(("du", "-b", "--one-file-system", "--max-depth=0", allowed_root))
-    stat_ok = command_ok(("stat", "--dereference", "--format", "%s", "--", allowed_root))
+    find_ok, du_ok, stat_ok = storage_capabilities_ok()
     storage_ok = find_ok and du_ok and stat_ok
     for tool in ("list_directories", "list_files"):
         result[tool] = capability(
@@ -404,26 +414,43 @@ def detect_capabilities(os_profile, allowed_root):  # noqa: C901
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--alias", required=True)
-    parser.add_argument("--allowed-root", required=True)
+    parser.add_argument("--allowed-root", action="append", required=True)
     args = parser.parse_args()
     if not ALIAS.match(args.alias):
         raise RuntimeError("invalid alias")
-    if (
-        not SAFE_PATH.match(args.allowed_root)
-        or args.allowed_root == "/"
-        or ".." in args.allowed_root.split("/")
-        or not os.path.isdir(args.allowed_root)
-    ):
-        raise RuntimeError("allowed root must be one existing safe absolute directory")
+    if not 1 <= len(args.allowed_root) <= MAX_ALLOWED_ROOTS:
+        raise RuntimeError("allowed roots must contain 1..16 directories")
+    allowed_roots = []
+    for root in args.allowed_root:
+        normalized = root.rstrip("/")
+        if (
+            not SAFE_PATH.match(root)
+            or normalized == ""
+            or normalized == "/"
+            or ".." in root.split("/")
+            or not os.path.isdir(root)
+        ):
+            raise RuntimeError("allowed roots must contain existing safe absolute directories")
+        allowed_roots.append(normalized)
+    if len(set(allowed_roots)) != len(allowed_roots):
+        raise RuntimeError("allowed roots must not contain duplicate directories")
+    allowed_roots.sort()
+    resolved_roots = sorted(os.path.realpath(root) for root in allowed_roots)
+    if len(set(resolved_roots)) != len(resolved_roots):
+        raise RuntimeError("allowed roots must not resolve to duplicate directories")
+    for index, root in enumerate(resolved_roots):
+        for other in resolved_roots[index + 1 :]:
+            if other.startswith(root.rstrip("/") + "/"):
+                raise RuntimeError("allowed roots must not contain overlapping directories")
     os_profile = detect_os()
     payload = {
         "schema_version": SCHEMA_VERSION,
         "alias": args.alias,
-        "allowed_root": args.allowed_root.rstrip("/"),
+        "allowed_roots": allowed_roots,
         "os": os_profile,
         "ssh": detect_ssh(),
         "runtime": detect_runtime(),
-        "capabilities": detect_capabilities(os_profile, args.allowed_root),
+        "capabilities": detect_capabilities(os_profile),
         "collected_at": datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
     }
     encoded = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))

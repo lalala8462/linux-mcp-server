@@ -21,6 +21,7 @@ import tempfile
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any
 from typing import cast
 from typing import Literal
@@ -29,6 +30,7 @@ from linux_mcp_server import __version__
 from linux_mcp_server.host_registry import CapabilityProfile
 from linux_mcp_server.host_registry import HostProfile
 from linux_mcp_server.host_registry import MANAGED_TOOL_NAMES
+from linux_mcp_server.host_registry import normalize_allowed_roots
 from linux_mcp_server.host_registry import normalize_ssh_public_key
 from linux_mcp_server.host_registry import OSProfile
 from linux_mcp_server.host_registry import PROFILE_SCHEMA_VERSION
@@ -42,7 +44,8 @@ ASSET_ROOT = Path(__file__).resolve().parent / "centos"
 COLLECTOR = ASSET_ROOT / "collect-host-profile.py"
 INSTALLER = ASSET_ROOT / "install-readonly-account.sh"
 WRAPPER = ASSET_ROOT / "linux-mcp-readonly.py"
-WRAPPER_VERSION = "3"
+PRIVILEGED_HELPER = ASSET_ROOT / "linux-mcp-privileged-read"
+WRAPPER_VERSION = "5"
 ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")
 ROOT_RE = re.compile(r"^/[A-Za-z0-9._/-]+$")
 VERIFICATION_REASONS = frozenset(
@@ -104,27 +107,40 @@ def validate_alias(alias: str) -> str:
     return alias
 
 
-def validate_allowed_root(value: str) -> str:
-    normalized = value.rstrip("/")
-    if normalized == "" or normalized == "/" or not ROOT_RE.fullmatch(normalized) or ".." in normalized.split("/"):
-        raise RuntimeError("allowed_root must be one safe non-root absolute path")
-    return normalized
+def validate_allowed_roots(values: list[str]) -> tuple[str, ...]:
+    normalized = []
+    for value in values:
+        root = value.rstrip("/")
+        if root == "" or root == "/" or not ROOT_RE.fullmatch(root) or ".." in root.split("/"):
+            raise RuntimeError("allowed_roots entries must be safe non-root absolute paths")
+        normalized.append(root)
+    try:
+        return normalize_allowed_roots(normalized)
+    except ValueError as error:
+        raise RuntimeError(str(error)) from error
 
 
 def validate_discovery(  # noqa: C901
     payload: dict[str, Any],
     alias: str,
-    allowed_root: str,
+    allowed_roots: tuple[str, ...],
 ) -> dict[str, Any]:
-    required = {"schema_version", "alias", "allowed_root", "os", "ssh", "capabilities", "collected_at"}
+    schema_version = payload.get("schema_version")
+    root_field = "allowed_root" if schema_version == 1 else "allowed_roots"
+    required = {"schema_version", "alias", root_field, "os", "ssh", "capabilities", "collected_at"}
     if set(payload) not in (required, required | {"runtime"}):
-        raise RuntimeError("Discovery JSON fields do not match schema version 1")
-    if payload["schema_version"] != PROFILE_SCHEMA_VERSION:
+        raise RuntimeError(f"Discovery JSON fields do not match schema version {schema_version}")
+    if schema_version not in (1, PROFILE_SCHEMA_VERSION):
         raise RuntimeError("Unsupported discovery schema version")
     if payload["alias"] != alias:
         raise RuntimeError("Discovery alias does not match the requested alias")
-    if payload["allowed_root"] != allowed_root.rstrip("/"):
-        raise RuntimeError("Discovery allowed_root does not match the requested root")
+    discovered_roots = (
+        validate_allowed_roots([payload["allowed_root"]])
+        if schema_version == 1
+        else validate_allowed_roots(payload["allowed_roots"])
+    )
+    if discovered_roots != allowed_roots:
+        raise RuntimeError("Discovery allowed_roots do not match the requested roots")
     try:
         collected_at = datetime.fromisoformat(payload["collected_at"].replace("Z", "+00:00"))
     except (AttributeError, ValueError) as error:
@@ -158,6 +174,9 @@ def validate_discovery(  # noqa: C901
             raise RuntimeError("Unsupported or mismatched host key")
         normalized_keys.append({"type": key_type, "public_key": public_key})
     normalized = dict(payload)
+    normalized["schema_version"] = PROFILE_SCHEMA_VERSION
+    normalized["allowed_roots"] = list(discovered_roots)
+    normalized.pop("allowed_root", None)
     normalized["os"] = os_profile.model_dump(mode="json")
     normalized["capabilities"] = {name: capabilities[name].model_dump(mode="json") for name in sorted(capabilities)}
     normalized["ssh"] = {"server_version": ssh["server_version"], "host_keys": normalized_keys}
@@ -222,10 +241,11 @@ def windows_path_hint(path: Path) -> str | None:
 
 def command_discover(args: argparse.Namespace) -> None:
     alias = validate_alias(args.alias)
-    allowed_root = validate_allowed_root(args.allowed_root)
+    allowed_roots = validate_allowed_roots(args.allowed_root)
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     bundle = output_dir / f"{alias}-discovery.tar.gz"
+    root_arguments = " ".join(f"--allowed-root {root!r}" for root in allowed_roots)
     runner = (
         "#!/bin/sh\n"
         "set -eu\n"
@@ -233,7 +253,7 @@ def command_discover(args: argparse.Namespace) -> None:
         "if command -v python3 >/dev/null 2>&1; then PYTHON=python3; "
         "elif command -v python >/dev/null 2>&1; then PYTHON=python; "
         "else echo '未找到 Python 2.6/3.x' >&2; exit 1; fi\n"
-        f'"$PYTHON" ./collect-host-profile.py --alias {alias!r} --allowed-root {allowed_root!r} '
+        f'"$PYTHON" ./collect-host-profile.py --alias {alias!r} {root_arguments} '
         "> ./discovery-result.json\n"
         'echo "已生成 discovery-result.json；请通过可信渠道回传该文件。"\n'
     )
@@ -258,11 +278,11 @@ def command_discover(args: argparse.Namespace) -> None:
 
 def command_import(args: argparse.Namespace) -> None:
     alias = validate_alias(args.alias)
-    allowed_root = validate_allowed_root(args.allowed_root)
+    allowed_roots = validate_allowed_roots(args.allowed_root)
     address = str(ipaddress.IPv4Address(args.address))
     if not 1 <= args.port <= 65535:
         raise RuntimeError("port must be in 1..65535")
-    discovery = validate_discovery(read_json(args.discovery_json), alias, allowed_root)
+    discovery = validate_discovery(read_json(args.discovery_json), alias, allowed_roots)
     actual_hash = sha256_file(args.bundle)
     hash_file = args.bundle.with_suffix(args.bundle.suffix + ".sha256")
     if hash_file.is_file():
@@ -278,7 +298,7 @@ def command_import(args: argparse.Namespace) -> None:
         "address": address,
         "port": args.port,
         "user": "codex-ro",
-        "allowed_root": allowed_root,
+        "allowed_roots": list(allowed_roots),
         "discovery_bundle_sha256": actual_hash,
         "discovery": discovery,
     }
@@ -293,11 +313,16 @@ def load_registration(args: argparse.Namespace, alias: str) -> dict[str, Any]:
     registration = read_json(registry_dir(args, alias) / "discovery.json")
     if registration.get("alias") != alias:
         raise RuntimeError("Stored discovery alias mismatch")
+    root_values = registration["allowed_roots"] if "allowed_roots" in registration else [registration["allowed_root"]]
+    allowed_roots = validate_allowed_roots(root_values)
     validate_discovery(
         registration["discovery"],
         alias,
-        registration["allowed_root"],
+        allowed_roots,
     )
+    registration["schema_version"] = PROFILE_SCHEMA_VERSION
+    registration["allowed_roots"] = list(allowed_roots)
+    registration.pop("allowed_root", None)
     return registration
 
 
@@ -340,15 +365,18 @@ def require_regular_asset(path: Path, label: str) -> None:
 def write_deployment_bundle(
     *,
     alias: str,
-    allowed_root: str,
+    allowed_roots: tuple[str, ...],
     major: int,
     private_key: Path,
     bundle: Path,
+    read_mode: Literal["user", "privileged"] = "user",
 ) -> tuple[str, str]:
     """Create one deployment archive without reading or packaging the private key."""
 
     if not bundle.name.endswith(".tar.gz"):
         raise RuntimeError("Deployment output must end with .tar.gz")
+    if read_mode not in ("user", "privileged"):
+        raise RuntimeError("Invalid read mode")
     sidecar = bundle.with_suffix(bundle.suffix + ".sha256")
     if bundle.exists() or sidecar.exists():
         raise RuntimeError(f"Deployment output already exists: {bundle}")
@@ -358,6 +386,7 @@ def write_deployment_bundle(
         (COLLECTOR, "collector"),
         (INSTALLER, "installer"),
         (WRAPPER, "wrapper"),
+        (PRIVILEGED_HELPER, "privileged helper"),
         (public_key, "client public key"),
     ):
         require_regular_asset(source, label)
@@ -367,7 +396,7 @@ def write_deployment_bundle(
     if not normalized_public_key.startswith(expected_public_type + " "):
         raise RuntimeError("Client public key type does not match the managed host")
 
-    policy = {"allowed_root": allowed_root}
+    policy = {"allowed_roots": list(allowed_roots), "read_mode": read_mode}
     install_command = f"sudo bash ./install-readonly-account.sh ./{public_key.name} ./policy.json codex-ro"
     if major == 6:
         install_command += " --allow-rsa"
@@ -379,6 +408,7 @@ def write_deployment_bundle(
             stage.mkdir()
             shutil.copy2(INSTALLER, stage / INSTALLER.name)
             shutil.copy2(WRAPPER, stage / WRAPPER.name)
+            shutil.copy2(PRIVILEGED_HELPER, stage / PRIVILEGED_HELPER.name)
             shutil.copy2(public_key, stage / public_key.name)
             (stage / "policy.json").write_text(
                 json.dumps(policy, ensure_ascii=True, sort_keys=True) + "\n",
@@ -468,7 +498,8 @@ def command_prepare(args: argparse.Namespace) -> None:
         alias=alias,
         address=registration["address"],
         port=registration["port"],
-        allowed_root=registration["allowed_root"],
+        allowed_roots=registration["allowed_roots"],
+        read_mode=getattr(args, "read_mode", "user"),
         os=discovery["os"],
         ssh=SSHProfile(
             server_version=discovery["ssh"]["server_version"],
@@ -490,10 +521,11 @@ def command_prepare(args: argparse.Namespace) -> None:
 
     digest, install_command = write_deployment_bundle(
         alias=alias,
-        allowed_root=registration["allowed_root"],
+        allowed_roots=tuple(registration["allowed_roots"]),
         major=major,
         private_key=private_key,
         bundle=bundle,
+        read_mode=profile.read_mode,
     )
     print_deployment_result(bundle, digest, host_fingerprint, install_command)
 
@@ -502,6 +534,7 @@ def command_rebuild_deployment(args: argparse.Namespace) -> None:
     alias = validate_alias(args.alias)
     host_dir = registry_dir(args, alias)
     profile = HostProfile.model_validate(read_json(host_dir / "profile.json"))
+    read_mode = getattr(args, "read_mode", None) or profile.read_mode
     private_key = profile.ssh.private_key_path
     expected_name = "id_rsa" if profile.ssh.client_key_type == "rsa" else "id_ed25519"
     if private_key.parent.resolve() != host_dir.resolve() or private_key.name != expected_name:
@@ -513,14 +546,16 @@ def command_rebuild_deployment(args: argparse.Namespace) -> None:
     bundle = args.output.resolve()
     digest, install_command = write_deployment_bundle(
         alias=alias,
-        allowed_root=profile.allowed_root,
+        allowed_roots=profile.allowed_roots,
         major=profile.os.major,
         private_key=private_key,
         bundle=bundle,
+        read_mode=read_mode,
     )
     updated_payload = profile.model_dump(mode="json")
     updated_payload["mcp_version"] = __version__
     updated_payload["wrapper_version"] = WRAPPER_VERSION
+    updated_payload["read_mode"] = read_mode
     updated_payload["verified_at"] = None
     updated = HostProfile.model_validate(updated_payload)
     atomic_json(host_dir / "profile.json", updated.model_dump(mode="json"))
@@ -531,19 +566,26 @@ def command_rebuild_deployment(args: argparse.Namespace) -> None:
 def command_list(args: argparse.Namespace) -> None:
     if not args.registry.is_dir():
         return
-    print("alias                           version       ssh          state")
+    print(
+        "alias                           address          port  user      version       ssh          read_mode   state"
+    )
     for host_dir in sorted(path for path in args.registry.iterdir() if path.is_dir() and not path.is_symlink()):
         try:
             registration = read_json(host_dir / "discovery.json")
             profile_path = host_dir / "profile.json"
             discovery = registration["discovery"]
             key_type = "pending"
+            read_mode = "user"
             state = "discovered"
             if profile_path.is_file():
                 profile = HostProfile.model_validate(read_json(profile_path))
                 key_type = profile.ssh.host_key_type
+                read_mode = profile.read_mode
                 state = "verified" if profile.verified_at else "prepared"
-            print(f"{registration['alias']:<31} {discovery['os']['version']:<13} {key_type:<12} {state}")
+            print(
+                f"{registration['alias']:<31} {registration['address']:<16} {registration['port']:<5} "
+                f"codex-ro  {discovery['os']['version']:<13} {key_type:<12} {read_mode:<11} {state}"
+            )
         except (KeyError, RuntimeError, ValueError):
             print(f"{host_dir.name:<31} {'invalid':<13} {'-':<12} invalid")
 
@@ -554,7 +596,8 @@ def command_show(args: argparse.Namespace) -> None:
     discovery = registration["discovery"]
     print(
         f"alias={alias}\naddress={registration['address']}:{registration['port']}\n"
-        f"centos={discovery['os']['version']}\nopenssh={discovery['ssh']['server_version']}"
+        f"centos={discovery['os']['version']}\nopenssh={discovery['ssh']['server_version']}\n"
+        f"allowed_roots={','.join(registration['allowed_roots'])}"
     )
     runtime = discovery.get("runtime")
     if runtime is not None:
@@ -565,6 +608,7 @@ def command_show(args: argparse.Namespace) -> None:
         print(f"host_key={profile.ssh.host_key_type} {profile.ssh.host_fingerprint}")
         print(f"client_key={profile.ssh.client_key_type}")
         print(f"state={'verified' if profile.verified_at else 'prepared'}")
+        print(f"read_mode={profile.read_mode}")
     else:
         print("state=discovered")
     print(profile_matrix(discovery["capabilities"]))
@@ -574,11 +618,19 @@ def command_verify(args: argparse.Namespace) -> None:
     alias = validate_alias(args.alias)
     host_dir = registry_dir(args, alias)
     profile = HostProfile.model_validate(read_json(host_dir / "profile.json"))
+    if profile.read_mode == "privileged":
+        if args.results_json is not None:
+            raise RuntimeError("Privileged verification requires live MCP calls; imported results are not accepted")
+        if not args.sample_file:
+            args.sample_file = [Path(root) / ".linux-mcp-verify/public.txt" for root in profile.allowed_roots]
+        if args.sample_log_file is None:
+            args.sample_log_file = Path(profile.allowed_roots[0]) / ".linux-mcp-verify/private/app.log"
     if args.results_json is not None:
         results = read_json(args.results_json)
     else:
-        if args.sample_file is None:
-            raise RuntimeError("--sample-file is required for live verification")
+        if not args.sample_file or args.sample_log_file is None:
+            raise RuntimeError("live verification requires --sample-file for every root and --sample-log-file")
+        validate_verification_paths(profile, args.sample_file, args.sample_log_file)
         results = asyncio.run(run_mcp_verification(args, profile))
         atomic_json(host_dir / "verification.json", results)
         print(f"verification_results={host_dir / 'verification.json'}")
@@ -593,7 +645,10 @@ def command_verify(args: argparse.Namespace) -> None:
 
 def accept_verification_results(profile: HostProfile, results: dict[str, Any]) -> None:
     alias = profile.alias
-    if set(results) != {"schema_version", "alias", "completed_at", "tools"}:
+    required = {"schema_version", "alias", "completed_at", "tools"}
+    if profile.read_mode == "privileged":
+        required.add("read_checks")
+    if set(results) != required:
         raise RuntimeError("Invalid verification result schema")
     if results["schema_version"] != 1 or results["alias"] != alias:
         raise RuntimeError("Verification result identity mismatch")
@@ -611,6 +666,15 @@ def accept_verification_results(profile: HostProfile, results: dict[str, Any]) -
             failures.append(f"{tool_name}({item['reason']})")
     if failures:
         raise RuntimeError("Verification outcomes do not match the profile: " + ", ".join(sorted(failures)))
+    if profile.read_mode == "privileged":
+        checks = results["read_checks"]
+        expected = {name for name, _, _, _ in privileged_verification_cases(profile)}
+        if (
+            not isinstance(checks, dict)
+            or set(checks) != expected
+            or any(value != "success" for value in checks.values())
+        ):
+            raise RuntimeError("Privileged read boundary checks did not all pass")
 
 
 def classify_verification_failure(rendered: str, *, is_error: bool) -> str:
@@ -630,6 +694,29 @@ def classify_verification_failure(rendered: str, *, is_error: bool) -> str:
     return "profile_mismatch"
 
 
+def _is_within_posix_root(path: Path, root: str) -> bool:
+    raw_path = path.as_posix()
+    parsed = PurePosixPath(raw_path)
+    return (
+        raw_path.startswith("/")
+        and ".." not in parsed.parts
+        and (raw_path == root or raw_path.startswith(root.rstrip("/") + "/"))
+    )
+
+
+def validate_verification_paths(profile: HostProfile, sample_files: list[Path], sample_log_file: Path) -> None:
+    uncovered = set(profile.allowed_roots)
+    for sample_file in sample_files:
+        matching = [root for root in profile.allowed_roots if _is_within_posix_root(sample_file, root)]
+        if len(matching) != 1:
+            raise RuntimeError(f"Sample file is outside managed allowed_roots: {sample_file}")
+        uncovered.discard(matching[0])
+    if uncovered:
+        raise RuntimeError("Missing --sample-file coverage for roots: " + ", ".join(sorted(uncovered)))
+    if not any(_is_within_posix_root(sample_log_file, root) for root in profile.allowed_roots):
+        raise RuntimeError(f"Sample log file is outside managed allowed_roots: {sample_log_file}")
+
+
 async def run_mcp_verification(args: argparse.Namespace, profile: HostProfile) -> dict[str, Any]:
     """Call all public fixed tools through an in-process MCP client and retain no payloads."""
 
@@ -640,67 +727,142 @@ async def run_mcp_verification(args: argparse.Namespace, profile: HostProfile) -
 
     CONFIG.host_registry_path = args.registry
     CONFIG.require_managed_host = True
-    CONFIG.allowed_roots = profile.allowed_root
-    log_file = args.sample_log_file or args.sample_file
-    tool_arguments = {
-        "get_system_information": {},
-        "get_cpu_information": {},
-        "get_memory_information": {},
-        "get_disk_usage": {},
-        "get_hardware_information": {},
-        "list_services": {},
-        "get_service_status": {"service_name": args.service},
-        "get_service_logs": {"service_name": args.service, "lines": 1},
-        "list_processes": {},
-        "get_process_info": {"pid": args.pid},
-        "get_journal_logs": {"lines": 1},
-        "read_log_file": {"log_path": str(log_file), "lines": 1},
-        "get_network_interfaces": {},
-        "get_network_connections": {},
-        "get_listening_ports": {},
-        "list_block_devices": {},
-        "list_directories": {"path": profile.allowed_root, "top_n": 1},
-        "list_files": {"path": profile.allowed_root, "top_n": 1},
-        "read_file": {"path": str(args.sample_file)},
+    CONFIG.allowed_roots = ",".join(profile.allowed_roots)
+    tool_arguments: dict[str, list[dict[str, Any]]] = {
+        "get_system_information": [{}],
+        "get_cpu_information": [{}],
+        "get_memory_information": [{}],
+        "get_disk_usage": [{}],
+        "get_hardware_information": [{}],
+        "list_services": [{}],
+        "get_service_status": [{"service_name": args.service}],
+        "get_service_logs": [{"service_name": args.service, "lines": 1}],
+        "list_processes": [{}],
+        "get_process_info": [{"pid": args.pid}],
+        "get_journal_logs": [{"lines": 1}],
+        "read_log_file": [{"log_path": args.sample_log_file.as_posix(), "lines": 1}],
+        "get_network_interfaces": [{}],
+        "get_network_connections": [{}],
+        "get_listening_ports": [{}],
+        "list_block_devices": [{}],
+        "list_directories": [
+            {
+                "path": root + "/.linux-mcp-verify" if profile.read_mode == "privileged" else root,
+                "order_by": "name",
+                "top_n": 1,
+            }
+            for root in profile.allowed_roots
+        ],
+        "list_files": [
+            {
+                "path": root + "/.linux-mcp-verify" if profile.read_mode == "privileged" else root,
+                "order_by": "name",
+                "top_n": 1,
+            }
+            for root in profile.allowed_roots
+        ],
+        "read_file": [{"path": path.as_posix()} for path in args.sample_file],
     }
     results: dict[str, dict[str, str]] = {}
     access_preflight = ("read_file", "read_log_file")
     ordered_tools = access_preflight + tuple(sorted(MANAGED_TOOL_NAMES - set(access_preflight)))
     async with Client(mcp) as client:
+        exposed = await client.list_tools()
+        if {tool.name for tool in exposed} != MANAGED_TOOL_NAMES or any(
+            tool.annotations is None or tool.annotations.readOnlyHint is not True for tool in exposed
+        ):
+            raise RuntimeError("Verification requires exactly the 19 fixed read-only MCP tools")
         for tool_name in ordered_tools:
-            arguments = dict(tool_arguments[tool_name])
-            arguments["host"] = profile.alias
-            call_result = await client.call_tool(
-                tool_name,
-                arguments=arguments,
-                raise_on_error=False,
-            )
-            rendered = " ".join(getattr(item, "text", "") for item in call_result.content)
-            reported_error = rendered.lstrip().casefold().startswith("error ")
             capability = profile.capabilities[tool_name]
+            argument_sets = tool_arguments[tool_name]
             if capability.status == "unsupported":
-                matched = call_result.is_error and profile.alias in rendered and tool_name in rendered
-                outcome = "unsupported" if matched else "failed"
-            elif capability.status == "partial":
-                matched = not call_result.is_error and not reported_error and "PARTIAL:" in rendered
-                outcome = "partial" if matched else "failed"
-            else:
-                matched = not call_result.is_error and not reported_error and bool(rendered.strip())
-                outcome = "success" if matched else "failed"
-            reason = (
-                "matched profile" if matched else classify_verification_failure(rendered, is_error=call_result.is_error)
-            )
+                argument_sets = argument_sets[:1]
+            reason = "matched profile"
+            outcome = {"exact": "success", "partial": "partial", "unsupported": "unsupported"}[capability.status]
+            for arguments_template in argument_sets:
+                arguments = dict(arguments_template)
+                arguments["host"] = profile.alias
+                call_result = await client.call_tool(
+                    tool_name,
+                    arguments=arguments,
+                    raise_on_error=False,
+                )
+                rendered = " ".join(getattr(item, "text", "") for item in call_result.content)
+                reported_error = rendered.lstrip().casefold().startswith("error ")
+                if capability.status == "unsupported":
+                    call_matched = call_result.is_error and profile.alias in rendered and tool_name in rendered
+                elif capability.status == "partial":
+                    call_matched = not call_result.is_error and not reported_error and "PARTIAL:" in rendered
+                else:
+                    call_matched = not call_result.is_error and not reported_error and bool(rendered.strip())
+                if not call_matched:
+                    outcome = "failed"
+                    reason = classify_verification_failure(rendered, is_error=call_result.is_error)
+                    break
             results[tool_name] = {
                 "outcome": outcome,
                 "reason": reason,
             }
             print(f"verification_tool={tool_name} outcome={outcome} reason={reason}", flush=True)
-    return {
+        read_checks = {}
+        if profile.read_mode == "privileged":
+            for name, tool, arguments, expected_text in privileged_verification_cases(profile):
+                call = await client.call_tool(
+                    tool, arguments={**arguments, "host": profile.alias}, raise_on_error=False
+                )
+                rendered = " ".join(getattr(item, "text", "") for item in call.content)
+                failed = call.is_error or rendered.lstrip().casefold().startswith("error ")
+                boundary_error = any(
+                    word in rendered.casefold() for word in ("outside", "symlink", "批准范围", "allowed_root")
+                )
+                matched = (
+                    failed and boundary_error if expected_text is None else not failed and expected_text in rendered
+                )
+                read_checks[name] = "success" if matched else "failed"
+                print(f"verification_read_check={name} outcome={read_checks[name]}", flush=True)
+    result = {
         "schema_version": 1,
         "alias": profile.alias,
         "completed_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "tools": results,
     }
+    if profile.read_mode == "privileged":
+        result["read_checks"] = read_checks
+    return result
+
+
+def privileged_verification_cases(profile: HostProfile) -> list[tuple[str, str, dict[str, Any], str | None]]:
+    cases = []
+    for index, root in enumerate(profile.allowed_roots):
+        base = root + "/.linux-mcp-verify"
+        prefix = f"root_{index + 1}_"
+        cases.extend(
+            [
+                (
+                    prefix + "root_file",
+                    "read_file",
+                    {"path": base + "/private/root-only.txt"},
+                    "linux-mcp-verification-v1",
+                ),
+                (
+                    prefix + "root_log",
+                    "read_log_file",
+                    {"log_path": base + "/private/app.log", "lines": 1},
+                    "linux-mcp-verification-v1",
+                ),
+                (prefix + "root_files", "list_files", {"path": base + "/private", "order_by": "name"}, "root-only.txt"),
+                (prefix + "root_dirs", "list_directories", {"path": base + "/private", "order_by": "name"}, "nested"),
+                (
+                    prefix + "root_dir_sizes",
+                    "list_directories",
+                    {"path": base + "/private", "order_by": "size"},
+                    "nested",
+                ),
+                (prefix + "symlink_escape", "read_file", {"path": base + "/outside-link"}, None),
+            ]
+        )
+    cases.append(("outside_roots", "read_file", {"path": "/__linux_mcp_outside_approved_roots__/sample.txt"}, None))
+    return cases
 
 
 def command_refresh(args: argparse.Namespace) -> None:
@@ -709,7 +871,7 @@ def command_refresh(args: argparse.Namespace) -> None:
     refreshed = validate_discovery(
         read_json(args.discovery_json),
         alias,
-        registration["allowed_root"],
+        tuple(registration["allowed_roots"]),
     )
     old = registration["discovery"]
     changes = []
@@ -743,7 +905,7 @@ def parser() -> argparse.ArgumentParser:
 
     discover = subcommands.add_parser("discover")
     discover.add_argument("--alias", required=True)
-    discover.add_argument("--allowed-root", required=True)
+    discover.add_argument("--allowed-root", action="append", required=True)
     discover.add_argument("--output-dir", type=Path, required=True)
     discover.set_defaults(handler=command_discover)
 
@@ -751,7 +913,7 @@ def parser() -> argparse.ArgumentParser:
     import_profile.add_argument("--alias", required=True)
     import_profile.add_argument("--address", required=True)
     import_profile.add_argument("--port", type=int, default=22)
-    import_profile.add_argument("--allowed-root", required=True)
+    import_profile.add_argument("--allowed-root", action="append", required=True)
     import_profile.add_argument("--discovery-json", type=Path, required=True)
     import_profile.add_argument("--bundle", type=Path, required=True)
     import_profile.add_argument("--replace", action="store_true")
@@ -770,17 +932,19 @@ def parser() -> argparse.ArgumentParser:
     prepare.add_argument("--output-dir", type=Path, required=True)
     prepare.add_argument("--accept-incomplete", action="store_true")
     prepare.add_argument("--allow-rsa", action="store_true")
+    prepare.add_argument("--read-mode", choices=("user", "privileged"), default="user")
     prepare.set_defaults(handler=command_prepare)
 
     rebuild = subcommands.add_parser("rebuild-deployment")
     rebuild.add_argument("--alias", required=True)
     rebuild.add_argument("--output", type=Path, required=True)
+    rebuild.add_argument("--read-mode", choices=("user", "privileged"))
     rebuild.set_defaults(handler=command_rebuild_deployment)
 
     verify = subcommands.add_parser("verify")
     verify.add_argument("--alias", required=True)
     verify.add_argument("--results-json", type=Path)
-    verify.add_argument("--sample-file", type=Path)
+    verify.add_argument("--sample-file", type=Path, action="append")
     verify.add_argument("--sample-log-file", type=Path)
     verify.add_argument("--service", default="sshd")
     verify.add_argument("--pid", type=int, default=1)

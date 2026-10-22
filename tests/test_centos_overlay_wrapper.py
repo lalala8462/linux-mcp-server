@@ -71,18 +71,26 @@ class ReadonlyWrapperTest(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.allowed_root = os.path.join(self.temp_dir.name, "project")
+        self.second_root = os.path.join(self.temp_dir.name, "data")
         self.read_root = self.allowed_root
         self.scan_root = os.path.join(self.allowed_root, "scan")
         os.makedirs(self.allowed_root)
+        os.makedirs(self.second_root)
         os.makedirs(self.scan_root)
         self.read_file = os.path.join(self.read_root, "application.yml")
         self.log_file = os.path.join(self.allowed_root, "messages")
+        self.second_file = os.path.join(self.second_root, "second.txt")
         with open(self.read_file, "w", encoding="utf-8") as file_handle:
             file_handle.write("server.port=8080\n")
         with open(self.log_file, "w", encoding="utf-8") as file_handle:
             file_handle.write("test\n")
+        with open(self.second_file, "w", encoding="utf-8") as file_handle:
+            file_handle.write("second\n")
         self.policy = {
-            "allowed_root": os.path.realpath(self.allowed_root),
+            "allowed_roots": (
+                os.path.realpath(self.allowed_root),
+                os.path.realpath(self.second_root),
+            ),
             "max_file_read_bytes": 1048576,
             "max_log_lines": 10000,
         }
@@ -172,6 +180,18 @@ class ReadonlyWrapperTest(unittest.TestCase):
         validated = WRAPPER.validate_command(command, self.policy)
         self.assertEqual(os.path.realpath(self.read_file), validated[-1])
 
+    def test_allows_read_file_in_each_root(self):
+        command = "head --bytes 1024 -- %s" % shlex_quote(self.second_file)
+        validated = WRAPPER.validate_command(command, self.policy)
+        self.assertEqual(os.path.realpath(self.second_file), validated[-1])
+
+    def test_load_policy_accepts_legacy_single_root(self):
+        policy_path = os.path.join(self.temp_dir.name, "single-root-policy.json")
+        with open(policy_path, "w", encoding="utf-8") as file_handle:
+            json.dump({"allowed_root": self.allowed_root}, file_handle)
+        policy = WRAPPER.load_policy(policy_path)
+        self.assertEqual((os.path.realpath(self.allowed_root),), policy["allowed_roots"])
+
     def test_rejects_legacy_three_scope_policy(self):
         policy_path = os.path.join(self.temp_dir.name, "legacy-policy.json")
         with open(policy_path, "w", encoding="utf-8") as file_handle:
@@ -185,6 +205,22 @@ class ReadonlyWrapperTest(unittest.TestCase):
             json.dump({"allowed_root": "/"}, file_handle)
         with self.assertRaises(WRAPPER.PolicyError):
             WRAPPER.load_policy(policy_path)
+
+    def test_rejects_invalid_allowed_roots_lists(self):
+        invalid_roots = (
+            [],
+            ["/"],
+            [self.allowed_root, self.allowed_root],
+            [self.allowed_root, os.path.join(self.allowed_root, "child")],
+            [self.allowed_root] * 17,
+        )
+        for index, roots in enumerate(invalid_roots):
+            with self.subTest(roots=roots):
+                policy_path = os.path.join(self.temp_dir.name, "invalid-policy-%s.json" % index)
+                with open(policy_path, "w", encoding="utf-8") as file_handle:
+                    json.dump({"allowed_roots": roots}, file_handle)
+                with self.assertRaises(WRAPPER.PolicyError):
+                    WRAPPER.load_policy(policy_path)
 
     def test_denies_sibling_directory_with_shared_prefix(self):
         sibling = self.allowed_root + "-other"
@@ -224,7 +260,7 @@ class ReadonlyWrapperTest(unittest.TestCase):
             file_handle.write("secret\n")
         os.symlink(outside_file, link_path)
         with self.assertRaises(WRAPPER.PolicyError):
-            WRAPPER._open_verified_path(link_path, (self.policy["allowed_root"],), "file")
+            WRAPPER._open_verified_path(link_path, self.policy["allowed_roots"], "file")
 
     def test_opened_descriptor_survives_later_path_replacement(self):
         replaceable = os.path.join(self.read_root, "replaceable.txt")
@@ -236,7 +272,7 @@ class ReadonlyWrapperTest(unittest.TestCase):
 
         descriptor = WRAPPER._open_verified_path(
             replaceable,
-            (self.policy["allowed_root"],),
+            self.policy["allowed_roots"],
             "file",
         )
         try:
@@ -258,7 +294,7 @@ class ReadonlyWrapperTest(unittest.TestCase):
 
         descriptor = WRAPPER._open_verified_path(
             replaceable,
-            (self.policy["allowed_root"],),
+            self.policy["allowed_roots"],
             "directory",
         )
         try:

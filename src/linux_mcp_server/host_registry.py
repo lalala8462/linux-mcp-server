@@ -23,7 +23,8 @@ from pydantic import field_validator
 from pydantic import model_validator
 
 
-PROFILE_SCHEMA_VERSION = 1
+PROFILE_SCHEMA_VERSION = 2
+MAX_ALLOWED_ROOTS = 16
 MANAGED_TOOL_NAMES = frozenset(
     {
         "get_system_information",
@@ -181,17 +182,52 @@ class SSHProfile(BaseModel):
         return self
 
 
+def normalize_allowed_roots(values: object) -> tuple[str, ...]:
+    """Validate and normalize one managed host's approved path roots."""
+
+    if not isinstance(values, (list, tuple)) or not 1 <= len(values) <= MAX_ALLOWED_ROOTS:
+        raise ValueError(f"allowed_roots must contain 1..{MAX_ALLOWED_ROOTS} paths")
+
+    normalized_roots: list[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            raise ValueError("allowed_roots entries must be strings")
+        normalized = str(PurePosixPath(value))
+        if (
+            not value.startswith("/")
+            or normalized == "/"
+            or value.rstrip("/") != normalized
+            or ".." in PurePosixPath(value).parts
+            or any(character in value for character in ("\x00", "\r", "\n"))
+        ):
+            raise ValueError("allowed_roots entries must be safe non-root absolute paths")
+        normalized_roots.append(normalized)
+
+    if len(set(normalized_roots)) != len(normalized_roots):
+        raise ValueError("allowed_roots must not contain duplicate paths")
+
+    roots = tuple(sorted(normalized_roots))
+    for index, root in enumerate(roots):
+        root_path = PurePosixPath(root)
+        for other in roots[index + 1 :]:
+            other_path = PurePosixPath(other)
+            if root_path in other_path.parents or other_path in root_path.parents:
+                raise ValueError("allowed_roots must not contain overlapping paths")
+    return roots
+
+
 class HostProfile(BaseModel):
     """Complete local contract for one managed host."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[1] = PROFILE_SCHEMA_VERSION
+    schema_version: Literal[2] = PROFILE_SCHEMA_VERSION
     alias: str
     address: str
     port: int = Field(ge=1, le=65535)
     user: Literal["codex-ro"] = "codex-ro"
-    allowed_root: str
+    allowed_roots: tuple[str, ...]
+    read_mode: Literal["user", "privileged"] = "user"
     os: OSProfile
     ssh: SSHProfile
     capabilities: dict[str, CapabilityProfile]
@@ -213,19 +249,29 @@ class HostProfile(BaseModel):
     def validate_address(cls, value: str) -> str:
         return str(ipaddress.IPv4Address(value))
 
-    @field_validator("allowed_root")
+    @model_validator(mode="before")
     @classmethod
-    def validate_allowed_root(cls, value: str) -> str:
-        normalized = str(PurePosixPath(value))
-        if (
-            not value.startswith("/")
-            or normalized == "/"
-            or value.rstrip("/") != normalized
-            or ".." in PurePosixPath(value).parts
-            or any(character in value for character in ("\x00", "\r", "\n"))
-        ):
-            raise ValueError("allowed_root must be one safe non-root absolute path")
-        return normalized
+    def migrate_single_root_profile(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        payload = dict(value)
+        schema_version = payload.get(
+            "schema_version",
+            PROFILE_SCHEMA_VERSION if "allowed_roots" in payload else 1,
+        )
+        if schema_version == 1:
+            if "allowed_root" not in payload or "allowed_roots" in payload:
+                raise ValueError("schema version 1 requires exactly one allowed_root")
+            payload["allowed_roots"] = [payload.pop("allowed_root")]
+            payload["schema_version"] = PROFILE_SCHEMA_VERSION
+        elif schema_version == PROFILE_SCHEMA_VERSION and "allowed_root" in payload:
+            raise ValueError("schema version 2 requires allowed_roots")
+        return payload
+
+    @field_validator("allowed_roots")
+    @classmethod
+    def validate_allowed_roots(cls, value: object) -> tuple[str, ...]:
+        return normalize_allowed_roots(value)
 
     @field_validator("discovery_bundle_sha256")
     @classmethod
@@ -324,10 +370,10 @@ def get_host_capability(host: str | None, tool_name: str) -> CapabilityProfile |
     return profile.capabilities[tool_name]
 
 
-def get_host_allowed_root(host: str | None) -> Path | None:
-    """Return the only approved path root for a managed alias."""
+def get_host_allowed_roots(host: str | None) -> tuple[Path, ...] | None:
+    """Return all approved path roots for a managed alias."""
 
     if host is None:
         return None
     profile = get_managed_profile(host)
-    return Path(profile.allowed_root) if profile is not None else None
+    return tuple(Path(root) for root in profile.allowed_roots) if profile is not None else None

@@ -33,6 +33,11 @@ esac
         self._write_command(
             "sudo",
             """#!/bin/sh
+if [ "${FAKE_SUDO_STATUS:-1}" = 1 ]; then
+  printf '%s\\n' 'User codex-ro is not allowed to run sudo on test-host.'
+else
+  printf '%s\\n' "${FAKE_SUDO_LISTING:-User codex-ro may run the following commands on test-host:}"
+fi
 exit "${FAKE_SUDO_STATUS:-1}"
 """,
         )
@@ -86,6 +91,44 @@ printf '%s SHA256:fake key\\n' "${FAKE_KEY_BITS:-4096}"
 
     def tearDown(self):
         self.temp_dir.cleanup()
+
+    def test_accepts_only_exact_helper_sudo_authorization(self):
+        listing = ('User codex-ro may run the following commands on test-host:\n'
+                   '    (root) NOPASSWD: /usr/local/libexec/linux-mcp-privileged-read ""')
+        result = self._run_function(
+            "validate_existing_account", "codex-ro", FAKE_SUDO_STATUS="0", FAKE_SUDO_LISTING=listing
+        )
+        self.assertEqual(0, result.returncode, result.stderr.decode("utf-8"))
+        escaped = self._run_function(
+            "validate_existing_account", "codex-ro", FAKE_SUDO_STATUS="0",
+            FAKE_SUDO_LISTING=listing.replace('""', '\\"\\"'),
+        )
+        self.assertEqual(0, escaped.returncode, escaped.stderr.decode("utf-8"))
+        for rule in (
+            "(ALL) NOPASSWD: ALL",
+            "(root) NOPASSWD: /usr/bin/python",
+            "(root) NOPASSWD: /usr/local/libexec/linux-mcp-privileged-read",
+            '(root) NOPASSWD: /usr/local/libexec/linux-mcp-privileged-read "", /bin/sh',
+        ):
+            denied = self._run_function(
+                "validate_existing_account", "codex-ro", FAKE_SUDO_STATUS="0",
+                FAKE_SUDO_LISTING="User codex-ro may run the following commands on test-host:\n    " + rule,
+            )
+            self.assertNotEqual(0, denied.returncode)
+
+    def test_helper_runtime_preflight_uses_actual_interpreter(self):
+        helper = os.path.join(ROOT, "scripts", "centos", "linux-mcp-privileged-read")
+        result = self._run_function("validate_helper_runtime", helper, sys.executable)
+        self.assertEqual(0, result.returncode, result.stderr.decode("utf-8"))
+
+    def test_sudoers_restricts_arguments_and_passes_visudo(self):
+        output = os.path.join(self.temp_dir.name, "sudoers")
+        result = self._run_function("write_sudoers", output)
+        self.assertEqual(0, result.returncode)
+        with open(output, encoding="utf-8") as stream:
+            self.assertIn('linux-mcp-privileged-read ""', stream.read())
+        result = subprocess.run(["/usr/sbin/visudo", "-cf", output], capture_output=True)
+        self.assertEqual(0, result.returncode, result.stderr.decode("utf-8"))
 
     def _write_command(self, name, content):
         path = os.path.join(self.bin_dir, name)
@@ -242,12 +285,17 @@ printf '%s SHA256:fake key\\n' "${FAKE_KEY_BITS:-4096}"
         self.assertNotEqual(0, result.returncode)
         self.assertIn("不能改用", result.stderr.decode("utf-8"))
 
-    def test_policy_requires_one_safe_allowed_root(self):
+    def test_policy_requires_safe_allowed_roots(self):
         policy = os.path.join(self.temp_dir.name, "policy.json")
         with open(policy, "w", encoding="utf-8") as handle:
-            json.dump({"allowed_root": self.temp_dir.name}, handle)
+            json.dump({"allowed_roots": [self.temp_dir.name, "/usr"]}, handle)
         valid = self._run_function("validate_policy_file", policy)
         self.assertEqual(0, valid.returncode, valid.stderr.decode("utf-8"))
+
+        with open(policy, "w", encoding="utf-8") as handle:
+            json.dump({"allowed_root": self.temp_dir.name}, handle)
+        legacy_single = self._run_function("validate_policy_file", policy)
+        self.assertEqual(0, legacy_single.returncode, legacy_single.stderr.decode("utf-8"))
 
         with open(policy, "w", encoding="utf-8") as handle:
             json.dump({"read_roots": [self.temp_dir.name]}, handle)
@@ -258,6 +306,12 @@ printf '%s SHA256:fake key\\n' "${FAKE_KEY_BITS:-4096}"
             json.dump({"allowed_root": "/"}, handle)
         root = self._run_function("validate_policy_file", policy)
         self.assertNotEqual(0, root.returncode)
+
+        for roots in ([], [self.temp_dir.name, self.temp_dir.name], ["/data", "/data/log"], ["/data"] * 17):
+            with open(policy, "w", encoding="utf-8") as handle:
+                json.dump({"allowed_roots": roots}, handle)
+            invalid = self._run_function("validate_policy_file", policy)
+            self.assertNotEqual(0, invalid.returncode)
 
     def test_rsa_requires_explicit_flag_and_4096_bits(self):
         public_key = os.path.join(self.temp_dir.name, "id_rsa.pub")

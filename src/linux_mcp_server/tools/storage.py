@@ -15,7 +15,8 @@ from linux_mcp_server.commands import CommandSpec
 from linux_mcp_server.commands import get_command
 from linux_mcp_server.compatibility import parse_lsblk_pairs
 from linux_mcp_server.config import CONFIG
-from linux_mcp_server.host_registry import get_host_allowed_root
+from linux_mcp_server.host_registry import get_host_allowed_roots
+from linux_mcp_server.host_registry import get_managed_profile
 from linux_mcp_server.models import BlockDevices
 from linux_mcp_server.models import NodeEntry
 from linux_mcp_server.models import StorageNodes
@@ -42,9 +43,9 @@ class SortBy(StrEnum):
 
 
 def _require_managed_path(path: Path, host: Host | None) -> None:
-    root = get_host_allowed_root(host)
-    if root is not None and path != root and root not in path.parents:
-        raise ToolError(f"Path is outside the managed allowed_root for host '{host}': {path}")
+    roots = get_host_allowed_roots(host)
+    if roots is not None and not any(path == root or root in path.parents for root in roots):
+        raise ToolError(f"Path is outside the managed allowed_roots for host '{host}': {path}")
 
 
 def attr_sorter(order_by: OrderBy):
@@ -72,7 +73,9 @@ async def _list_resources(
 
     # The du command will exit with code 1 even if it gets some valid results.
     # Only error in the case where we got non-zero exit code and no data in stdout.
-    if returncode != 0 and not stdout:
+    profile = get_managed_profile(host) if host is not None else None
+    # 受控 root 读取不能用部分输出掩盖超时、权限或 helper 失败。
+    if returncode != 0 and (not stdout or (profile is not None and profile.read_mode == "privileged")):
         raise ToolError(f"Error running command: command failed with return code {returncode}: {stderr}")
 
     entries = parser(stdout, order_by)

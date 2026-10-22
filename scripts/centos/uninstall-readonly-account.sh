@@ -59,6 +59,12 @@ backup_current_files() {
     require_regular_root_file "${target}"
     install -o root -g root -m 0600 "${target}" "${BACKUP_DIR}/$(basename "${target}")"
   done
+  # 新增资产对旧版安装是可选的；存在时必须先验证并备份。
+  for target in "${HELPER_TARGET:-/usr/local/libexec/linux-mcp-privileged-read}" "${SUDOERS_TARGET:-/etc/sudoers.d/linux-mcp-codex-ro}"; do
+    [[ -e "${target}" || -L "${target}" ]] || continue
+    require_regular_root_file "${target}"
+    install -o root -g root -m 0600 "${target}" "${BACKUP_DIR}/$(basename "${target}")"
+  done
 }
 
 determine_uninstall_mode() {
@@ -102,6 +108,8 @@ validate_account_name "${CONFIRMED_ACCOUNT}"
 
 readonly CONFIG_DIR="/etc/linux-mcp-readonly"
 readonly WRAPPER_TARGET="/usr/local/libexec/linux-mcp-readonly.py"
+readonly HELPER_TARGET="/usr/local/libexec/linux-mcp-privileged-read"
+readonly SUDOERS_TARGET="/etc/sudoers.d/linux-mcp-codex-ro"
 readonly POLICY_TARGET="${CONFIG_DIR}/policy.json"
 readonly ACCOUNT_MARKER="${CONFIG_DIR}/managed-account"
 readonly BACKUP_ROOT="${CONFIG_DIR}/backups"
@@ -130,6 +138,8 @@ fi
 if getent group "${TARGET_USER}" >/dev/null 2>&1; then
   groupdel "${TARGET_USER}"
 fi
+# 先撤销受控提权，再清理其他受管文件；标记仍最后移除。
+rm -f -- "${SUDOERS_TARGET}" "${HELPER_TARGET}"
 remove_managed_files "${WRAPPER_TARGET}" "${POLICY_TARGET}" "${ACCOUNT_MARKER}"
 
 if [[ "${UNINSTALL_MODE}" == "delete" ]]; then

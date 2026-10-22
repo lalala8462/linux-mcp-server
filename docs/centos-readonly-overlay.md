@@ -7,11 +7,15 @@ fixed-command overlay for a dedicated `codex-ro` account.
 ## Repository assets
 
 - `config/centos-policy.example.json`: Copy to the ignored
-  `config/centos-policy.local.json` and set one approved `allowed_root`. Never
-  use `/` as the root. The policy does not change POSIX permissions or ACLs.
+  `config/centos-policy.local.json` and set 1–16 disjoint approved
+  `allowed_roots`. Never use `/` as a root. The policy does not change POSIX
+  permissions or ACLs.
 - `scripts/centos/linux-mcp-readonly.py`: Validates the fixed command allowlist,
   validates descriptor-backed paths, and rejects symlinks and path races. It
   remains syntax-compatible with the system Python 2.6 shipped by CentOS 6.
+- `scripts/centos/linux-mcp-privileged-read`: Optional, fixed-request root
+  reader for approved regular files and directory metadata. It is installed
+  only when the root-owned policy explicitly selects `read_mode=privileged`.
 - `scripts/centos/install-readonly-account.sh`: Installs the wrapper, policy,
   dedicated account marker, and forced public-key command.
 - `scripts/centos/uninstall-readonly-account.sh`: Performs an explicitly
@@ -21,9 +25,11 @@ fixed-command overlay for a dedicated `codex-ro` account.
 
 ## Account installation
 
-Generate the client public key on the control system. Upload only the public key,
-the local policy, `linux-mcp-readonly.py`, and `install-readonly-account.sh` to
-the target server. Do not upload the private key.
+Prefer the complete `linux-mcp-hosts` deployment archive described in the
+[main README](../README.md). It includes the public key, policy, wrapper,
+helper and installer with a file-hash manifest. Never upload the private key.
+When assembling a reviewed manual installation, include all these source assets;
+an old wrapper-only archive cannot install privileged reading.
 
 For a new account, the target-server administrator runs:
 
@@ -47,7 +53,7 @@ sudo bash /tmp/linux-mcp-bootstrap/install-readonly-account.sh \
 ```
 
 The installer rejects UID 0, a nonmatching primary group, wheel membership,
-unapproved groups, usable noninteractive sudo, and account-name mismatches. It
+unapproved groups, sudo rights beyond the single exact helper, and account-name mismatches. It
 locks the account password and installs an SSH forced command, so `codex-ro` is
 not an interactive shell account.
 
@@ -74,22 +80,83 @@ the shared `linux-mcp-logread` group.
 ## Host keys and verification
 
 Host onboarding is two-stage. Generate an administrator-run discovery archive
-with `linux-mcp-hosts discover`, import its bounded JSON with
+with repeated `--allowed-root` arguments, import its bounded JSON with
 `import-profile`, review the 19-tool capability matrix, and only then run
 `prepare`. `prepare` requires a trusted host public-key file and writes
 `known_hosts` directly from it; `ssh-keyscan` is never used as identity
 evidence. Profiles are stored outside Git below
 `~/.local/share/linux-mcp-server/hosts/<alias>/profile.json` with mode `0600`.
 
-After the administrator installs the deployment archive, run `verify` with a
-safe sample text file and a separate sample log under the host's `allowed_root`.
+Discovery validates that every approved root exists and is safe, but checks the
+required `find`, `du`, and `stat` options only against the small extracted
+discovery directory. It does not recursively scan approved roots. Real path
+access is checked later as `codex-ro` by `verify`. Regenerate the discovery
+archive to receive collector updates; an existing valid result remains
+importable. Runtime `list_directories` calls ordered by size still analyze the
+requested directory and can be slow for large trees.
+
+For `user` mode, after the administrator installs the deployment archive, run `verify` with one
+safe `--sample-file` under every configured root and a separate
+`--sample-log-file` under any configured root. For example:
+
+```bash
+linux-mcp-hosts discover --alias server-1 \
+  --allowed-root /usr \
+  --allowed-root /data \
+  --output-dir ~/.local/share/linux-mcp-server/bundles
+
+linux-mcp-hosts verify --alias server-1 \
+  --sample-file /usr/share/doc/example.txt \
+  --sample-file /data/example.txt \
+  --sample-log-file /data/example.log
+```
+
 Confirm that `codex-ro` has POSIX or ACL read permission first; the policy does
 not grant filesystem access. The command calls all 19 tools through an
 in-process MCP client, stores only normalized outcome metadata, and reports
 permission, timeout, authentication, and transport failures without retaining
-file contents.
+file contents. Privileged-mode samples and verification are described below.
 
 Use `rebuild-deployment` after wrapper or installer changes. It reuses the
 managed key, includes only the public key, writes a file-hash manifest, and
 refuses to overwrite an existing archive. Use `refresh` after OS, host-key, or
 capability drift. Do not enable an arbitrary shell or `run_script`.
+
+## Controlled privileged reading
+
+`allowed_roots` is a path allowlist, not a POSIX permission grant. Policies and
+legacy profiles without `read_mode` retain `user` behavior. For an explicitly
+approved upgrade, use `rebuild-deployment --read-mode privileged`, keeping the
+existing account, key, host identity and roots. The operator must review the
+effective roots because root reading makes additional data inside them visible.
+
+The privileged mode installs a root-owned `0700` helper and a `0440` sudoers
+file granting only `codex-ro` the fixed helper with no command-line arguments.
+The JSON request comes through stdin and cannot specify a policy, larger roots,
+identity or arbitrary command. The helper checks kernel parent identity (including
+sudo monitor and direct-exec modes), root
+identity, root-controlled policy/ancestors, path components and the opened file
+descriptor. Symlinks, special files, hard-linked files, writes, deletes and
+unrecognized operations fail closed. It caps request/output size and runtime;
+directory subprocesses are fixed `find`/`du` invocations with bounded output and
+process-group cleanup. A failed scan never returns partial output as success.
+
+Before changing the active setup, the installer checks the actual interpreter,
+existing sudoers, exact authorization and protected paths. It requires
+`/etc/sudoers.d` to be enabled, validates the candidate using `visudo`, and rejects
+broad sudo rules rather than removing the original privilege check. It does not
+enable root SSH login, store passwords, or add a service or port.
+
+Every approved root receives a small `.linux-mcp-verify` sample tree owned by
+root, including public text, `0600` root-only text/logs and `0700` directories.
+Existing unexpected objects at those paths are rejected instead of overwritten.
+`verify --alias <alias>` in privileged mode reads these through the actual MCP
+tools and checks root file/log/directory access and out-of-root/symlink rejection
+in addition to all 19 capability outcomes. It rejects imported results. File
+permission failures are neither success nor unsupported capabilities. Verification
+scans only the sample tree, avoiding a recursive scan of the full approved roots.
+
+The uninstaller backs up and removes the managed helper and sudoers before the
+final marker cleanup; historical backups and verification sample trees remain
+for administrator-reviewed retention or removal. No business directory permission
+or ACL is broadened by this mechanism.

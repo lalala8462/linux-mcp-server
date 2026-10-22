@@ -1,6 +1,7 @@
 # Python
 __pycache__/
 *.py[codz]
+/scripts/centos/linux-mcp-privileged-readc
 *$py.class
 *.so
 .Python

@@ -1,5 +1,7 @@
 """Tests for log tools."""
 
+from pathlib import Path
+
 import pytest
 
 from fastmcp.exceptions import ToolError
@@ -317,6 +319,29 @@ class TestReadLogFile:
 
         assert "content2" in content["entries"]
 
+    async def test_managed_roots_override_broader_environment(
+        self, mcp_client, mock_execute_with_fallback, mock_allowed_roots, mocker
+    ):
+        mock_allowed_roots("/etc")
+        mocker.patch(
+            "linux_mcp_server.tools.logs.get_host_allowed_roots",
+            autospec=True,
+            return_value=(Path("/data"), Path("/usr")),
+        )
+        mock_execute_with_fallback.return_value = (0, "managed", "")
+
+        result = await mcp_client.call_tool(
+            "read_log_file",
+            {"log_path": "/usr/app.log", "host": "server-1"},
+        )
+        assert "managed" in result.structured_content["entries"]
+
+        with pytest.raises(ToolError, match="not allowed|invalid component"):
+            await mcp_client.call_tool(
+                "read_log_file",
+                {"log_path": "/etc/messages", "host": "server-1"},
+            )
+
     async def test_read_log_file_remote_execution(self, mcp_client, mock_execute_with_fallback, mock_allowed_roots):
         """Test read_log_file with remote execution."""
         log_path = "/var/log/remote.log"
@@ -350,7 +375,7 @@ class TestReadLogFile:
     ):
         mock_allowed_roots("/var/log")
 
-        with pytest.raises(ToolError, match="not allowed"):
+        with pytest.raises(ToolError, match="not allowed|invalid component"):
             await mcp_client.call_tool(
                 "read_log_file",
                 {"log_path": "/var/log/../private/error.log", "host": "remote.server.com"},

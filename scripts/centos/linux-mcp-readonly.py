@@ -13,6 +13,7 @@ import os
 import re
 import shlex
 import stat
+import subprocess
 import sys
 import syslog
 
@@ -26,6 +27,8 @@ except NameError:
 
 
 POLICY_PATH = "/etc/linux-mcp-readonly/policy.json"
+PRIVILEGED_HELPER = "/usr/local/libexec/linux-mcp-privileged-read"
+MAX_ALLOWED_ROOTS = 16
 BINARY_DIRS = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
 PROC_SELF_FD = "/proc/self/fd"
 ALLOWED_BINARIES = set((
@@ -96,27 +99,52 @@ def _exception_text(error):
 
 def _split_command(original_command):
     # Python 2.6 shlex 必须接收原生字节串；Python 3 才将 bytes 解码为 str。
-    if isinstance(original_command, bytes) and bytes is not str:
-        original_command = original_command.decode("utf-8", "strict")
+    if sys.version_info[0] >= 3:
+        if isinstance(original_command, bytes):
+            original_command = original_command.decode("utf-8", "strict")
     return shlex.split(original_command, posix=True)
 
 
-def load_policy(path=POLICY_PATH):
+def load_policy(path=POLICY_PATH):  # noqa: C901
     with open(path, "rb") as policy_file:
         data = json.loads(_text(policy_file.read()))
 
     legacy_keys = ("read_roots", "scan_roots", "log_paths")
     if any(key in data for key in legacy_keys):
-        raise PolicyError("策略格式已过期，请使用单个 allowed_root 重新生成部署包")
-    allowed_root = data.get("allowed_root")
-    if not isinstance(allowed_root, STRING_TYPES):
-        raise PolicyError("allowed_root 必须是字符串")
-    allowed_root = _text(allowed_root)
-    if not allowed_root.startswith("/") or "\x00" in allowed_root:
-        raise PolicyError("allowed_root 必须是安全的绝对路径")
-    data["allowed_root"] = os.path.realpath(allowed_root)
-    if data["allowed_root"] == "/":
-        raise PolicyError("allowed_root 不能为 /")
+        raise PolicyError("策略格式已过期，请使用统一的 allowed_roots 重新生成部署包")
+
+    has_single_root = "allowed_root" in data
+    has_multiple_roots = "allowed_roots" in data
+    if has_single_root == has_multiple_roots:
+        raise PolicyError("策略必须且只能包含 allowed_root 或 allowed_roots")
+    roots = [data["allowed_root"]] if has_single_root else data["allowed_roots"]
+    if not isinstance(roots, list) or not 1 <= len(roots) <= MAX_ALLOWED_ROOTS:
+        raise PolicyError("allowed_roots 必须包含 1..16 个目录")
+
+    normalized_roots = []
+    for root in roots:
+        if not isinstance(root, STRING_TYPES):
+            raise PolicyError("allowed_roots 中的目录必须是字符串")
+        root = _text(root)
+        if not root.startswith("/") or "\x00" in root or "\r" in root or "\n" in root or ".." in root.split("/"):
+            raise PolicyError("allowed_roots 中的目录必须是安全的绝对路径")
+        normalized = os.path.realpath(root)
+        if normalized == "/":
+            raise PolicyError("allowed_roots 不能包含 /")
+        normalized_roots.append(normalized)
+
+    if len(set(normalized_roots)) != len(normalized_roots):
+        raise PolicyError("allowed_roots 不能包含重复目录")
+    normalized_roots.sort()
+    for index, root in enumerate(normalized_roots):
+        for other in normalized_roots[index + 1 :]:
+            if other.startswith(root.rstrip(os.sep) + os.sep):
+                raise PolicyError("allowed_roots 不能包含父子重叠目录")
+    data["allowed_roots"] = tuple(normalized_roots)
+    data.pop("allowed_root", None)
+    data["read_mode"] = data.get("read_mode", "user")
+    if data["read_mode"] not in ("user", "privileged"):
+        raise PolicyError("read_mode 必须是 user 或 privileged")
 
     data["max_file_read_bytes"] = int(data.get("max_file_read_bytes", 1048576))
     data["max_log_lines"] = int(data.get("max_log_lines", 10000))
@@ -157,22 +185,22 @@ def _within(path, roots):
 
 
 def _read_path(path, policy):
-    canonical = _within(path, (policy["allowed_root"],))
-    if not os.path.isfile(canonical):
+    canonical = _within(path, policy["allowed_roots"])
+    if policy.get("read_mode", "user") != "privileged" and not os.path.isfile(canonical):
         raise PolicyError(_format_text("读取目标不是普通文件：%s", path))
     return canonical
 
 
 def _scan_path(path, policy):
-    canonical = _within(path, (policy["allowed_root"],))
-    if not os.path.isdir(canonical):
+    canonical = _within(path, policy["allowed_roots"])
+    if policy.get("read_mode", "user") != "privileged" and not os.path.isdir(canonical):
         raise PolicyError(_format_text("扫描目标不是目录：%s", path))
     return canonical
 
 
 def _log_path(path, policy):
-    canonical = _within(path, (policy["allowed_root"],))
-    if not os.path.isfile(canonical):
+    canonical = _within(path, policy["allowed_roots"])
+    if policy.get("read_mode", "user") != "privileged" and not os.path.isfile(canonical):
         raise PolicyError(_format_text("日志目标不是普通文件：%s", path))
     return canonical
 
@@ -232,21 +260,21 @@ def _prepare_path_command(validated, policy):
     descriptor = None
 
     if name in ("head", "stat"):
-        descriptor = _open_verified_path(command[-1], (policy["allowed_root"],), "file")
+        descriptor = _open_verified_path(command[-1], policy["allowed_roots"], "file")
         command[-1] = _fd_path(descriptor)
     elif name == "tail":
         descriptor = _open_verified_path(
             command[-1],
-            (policy["allowed_root"],),
+            policy["allowed_roots"],
             "file",
         )
         command[-1] = _fd_path(descriptor)
     elif name == "du":
-        descriptor = _open_verified_path(command[-1], (policy["allowed_root"],), "directory")
+        descriptor = _open_verified_path(command[-1], policy["allowed_roots"], "directory")
         command.insert(1, "-H")
         command[-1] = _fd_path(descriptor)
     elif name == "find":
-        descriptor = _open_verified_path(command[1], (policy["allowed_root"],), "directory")
+        descriptor = _open_verified_path(command[1], policy["allowed_roots"], "directory")
         command.insert(1, "-H")
         command[2] = _fd_path(descriptor)
 
@@ -472,6 +500,45 @@ def _handle_command_lookup(original_command):
     return True
 
 
+def _privileged_request(command):
+    """已校验的固定文件命令映射为 helper 操作，不把命令文本交给 root。"""
+    name = command[0]
+    request = {"version": 1, "op": "", "path": command[-1], "limit": 0, "format": ""}
+    if name in ("head", "tail", "stat"):
+        request["op"] = {"head": "read", "tail": "tail", "stat": "stat"}[name]
+        if name != "stat":
+            request["limit"] = int(command[2])
+    elif name == "du":
+        request["op"] = "directory_sizes"
+    elif name == "find":
+        request["path"] = command[1]
+        request["op"] = "list_files" if command[7] == "f" else "list_dirs"
+        request["format"] = {"%f\\n": "name", "%T@\\t%f\\n": "modified", "%s\\t%f\\n": "size"}[command[9]]
+    else:
+        return None
+    return request
+
+
+def _run_privileged_read(request):
+    sudo = None
+    for directory in BINARY_DIRS:
+        candidate = os.path.realpath(os.path.join(directory, "sudo"))
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            info = os.stat(candidate)
+            if info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                raise PolicyError("sudo 程序权限不安全")
+            sudo = candidate
+            break
+    if sudo is None:
+        raise PolicyError("未安装 sudo，受控提权读取不可用")
+    process = subprocess.Popen(
+        [sudo, "-n", "--", PRIVILEGED_HELPER], stdin=subprocess.PIPE,
+        env={"PATH": ":".join(BINARY_DIRS), "LANG": "C", "LC_ALL": "C"},
+    )
+    process.communicate(json.dumps(request, ensure_ascii=True).encode("ascii"))
+    return process.returncode
+
+
 def main():
     original_command = os.environ.get("SSH_ORIGINAL_COMMAND", "")
     try:
@@ -479,6 +546,11 @@ def main():
             return 0
         policy = load_policy()
         validated = validate_command(original_command, policy)
+        if policy["read_mode"] == "privileged":
+            request = _privileged_request(validated)
+            if request is not None:
+                _write_syslog(syslog.LOG_INFO, _format_text("PRIVILEGED %s", request["op"]))
+                return _run_privileged_read(request)
         prepared, _descriptor = _prepare_path_command(validated, policy)
         binary = resolve_binary(prepared[0])
         argv = [binary] + prepared[1:]

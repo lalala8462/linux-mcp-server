@@ -12,7 +12,7 @@ from pydantic.functional_validators import BeforeValidator
 from linux_mcp_server.audit import log_tool_call
 from linux_mcp_server.commands import get_command
 from linux_mcp_server.config import CONFIG
-from linux_mcp_server.host_registry import get_host_allowed_root
+from linux_mcp_server.host_registry import get_host_allowed_roots
 from linux_mcp_server.models import LogEntries
 from linux_mcp_server.server import mcp
 from linux_mcp_server.utils import StrEnum
@@ -166,11 +166,11 @@ async def read_log_file(
     Retrieves the last N lines from a log file. The file path must be below an
     allowed root configured via LINUX_MCP_ALLOWED_ROOTS.
     """
-    managed_root = get_host_allowed_root(host)
+    managed_roots = get_host_allowed_roots(host)
     allowed_roots_env = CONFIG.allowed_roots
 
-    if managed_root is not None:
-        allowed_roots = [managed_root]
+    if managed_roots is not None:
+        allowed_roots = list(managed_roots)
     elif allowed_roots_env:
         allowed_roots = [Path(root.strip()) for root in allowed_roots_env.split(",") if root.strip()]
     else:
