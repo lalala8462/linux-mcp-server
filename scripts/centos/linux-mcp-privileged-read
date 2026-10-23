@@ -288,7 +288,7 @@ def execute_request(request, policy):
             return (str(os.fstat(descriptor).st_size) + "\n").encode("ascii")
         path = fd_path(descriptor)
         if operation == "directory_sizes":
-            command = [trusted_binary("du"), "-H", "-b", "--one-file-system", "--max-depth=1", path]
+            command = [trusted_binary("du"), "-H", "--block-size=1", "--one-file-system", "--max-depth=1", path]
         else:
             formats = {"name": "%f\\n", "modified": "%T@\\t%f\\n", "size": "%s\\t%f\\n"}
             command = [

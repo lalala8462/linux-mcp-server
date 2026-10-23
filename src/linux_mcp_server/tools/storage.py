@@ -149,15 +149,27 @@ async def list_directories(
     modification time, supporting flexible sorting and result limiting.
     """
     _require_managed_path(path, host)
-    return await _list_resources(
+    command = get_command(f"list_directories_{order_by}")
+    profile = get_managed_profile(host) if host is not None else None
+    legacy_size = (
+        order_by == OrderBy.SIZE
+        and profile is not None
+        and (not profile.wrapper_version.isdigit() or int(profile.wrapper_version) < 6)
+    )
+    if legacy_size:
+        command = CommandSpec(args=("du", "-b", "--one-file-system", "--max-depth=1", "{path}"))
+    result = await _list_resources(
         path=path,
-        command=get_command(f"list_directories_{order_by}"),
+        command=command,
         order_by=order_by,
         sort=sort,
         top_n=top_n,
         host=host,
         parser=parse_directory_listing,
     )
+    if order_by == OrderBy.SIZE:
+        result.size_basis = "apparent_bytes" if legacy_size else "allocated_bytes"
+    return result
 
 
 @mcp.tool(

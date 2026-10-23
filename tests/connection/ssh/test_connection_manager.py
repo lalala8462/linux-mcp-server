@@ -13,7 +13,11 @@ from linux_mcp_server.execution_context import use_execution_context
 def mock_connection(mocker):
     mock_connection = mocker.AsyncMock(asyncssh.SSHClientConnection, name="connection")
     mock_connection.get_extra_info.return_value = "testuser"
-    mock_connection.run.return_value = mocker.Mock(exit_status=0, stdout="remote output", stderr="")
+    mock_connection.bounded_run = mocker.patch(
+        "linux_mcp_server.connection.ssh.run_bounded_remote",
+        autospec=True,
+        return_value=mocker.Mock(exit_status=0, stdout="remote output", stderr=""),
+    )
     mock_connection.is_closed.return_value = False
 
     return mock_connection
@@ -109,7 +113,7 @@ async def test_execute_remote_success(mocker, mock_asyncssh_connect, mock_connec
     assert returncode == 0
     assert stdout == "remote output"
     assert stderr == ""
-    assert mock_connection.run.call_count == 1
+    assert mock_connection.bounded_run.call_count == 1
 
 
 async def test_execute_remote_command_failure(mocker, mock_connection):
@@ -117,7 +121,7 @@ async def test_execute_remote_command_failure(mocker, mock_connection):
     manager = SSHConnectionManager()
     manager._connections.clear()
 
-    mock_connection.run.side_effect = asyncssh.Error(1, "Raised intentionally")
+    mock_connection.bounded_run.side_effect = asyncssh.Error(1, "Raised intentionally")
     mock_get_connection = mocker.AsyncMock(asyncssh.SSHClientConnection, return_value=mock_connection)
     mocker.patch.object(manager, "get_connection", mock_get_connection)
 

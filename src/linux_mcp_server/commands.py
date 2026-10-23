@@ -213,7 +213,7 @@ COMMANDS: Mapping[str, CommandGroup] = MappingProxyType(
         ),
         "list_directories_size": CommandGroup(
             commands={
-                "default": CommandSpec(args=("du", "-b", "--one-file-system", "--max-depth=1", "{path}")),
+                "default": CommandSpec(args=("du", "--block-size=1", "--one-file-system", "--max-depth=1", "{path}")),
             }
         ),
         "list_directories_name": CommandGroup(

@@ -253,9 +253,6 @@ validate_managed_account() {
 backup_existing_files() {
   local timestamp target
 
-  if [[ ! -e "${WRAPPER_TARGET}" && ! -e "${POLICY_TARGET}" ]]; then
-    return
-  fi
   timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
   BACKUP_DIR="${BACKUP_ROOT}/${timestamp}"
   [[ ! -e "${BACKUP_DIR}" ]] || fail "备份目录已存在，拒绝覆盖：${BACKUP_DIR}"
@@ -455,6 +452,8 @@ readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly WRAPPER_SOURCE="${SCRIPT_DIR}/linux-mcp-readonly.py"
 readonly WRAPPER_TARGET="/usr/local/libexec/linux-mcp-readonly.py"
 readonly HELPER_SOURCE="${SCRIPT_DIR}/linux-mcp-privileged-read"
+readonly IDENTITY_SOURCE="${SCRIPT_DIR}/install-ssh-identity.py"
+readonly DEPLOYMENT_IDENTITY="${SCRIPT_DIR}/deployment.json"
 readonly HELPER_TARGET="/usr/local/libexec/linux-mcp-privileged-read"
 readonly SUDOERS_TARGET="/etc/sudoers.d/linux-mcp-codex-ro"
 readonly CONFIG_DIR="/etc/linux-mcp-readonly"
@@ -466,7 +465,7 @@ WRITE_ACCOUNT_MARKER=false
 
 validate_account_name "${TARGET_USER}"
 [[ "${TARGET_USER}" == codex-ro ]] || fail "固定 helper 只允许 codex-ro 账号"
-for required_file in "${PUBLIC_KEY_FILE}" "${POLICY_FILE}" "${WRAPPER_SOURCE}" "${HELPER_SOURCE}"; do
+for required_file in "${PUBLIC_KEY_FILE}" "${POLICY_FILE}" "${WRAPPER_SOURCE}" "${HELPER_SOURCE}" "${IDENTITY_SOURCE}" "${DEPLOYMENT_IDENTITY}"; do
   [[ -f "${required_file}" && ! -L "${required_file}" ]] || fail "文件不存在或是符号链接：${required_file}"
 done
 validate_wrapper_runtime "${WRAPPER_SOURCE}"
@@ -490,6 +489,12 @@ if [[ "${READ_MODE}" == privileged ]]; then
 fi
 
 public_key="$(validate_public_key "${PUBLIC_KEY_FILE}" "${ALLOW_RSA}")"
+managed_upgrade=false
+[[ ! -e "${ACCOUNT_MARKER}" ]] || managed_upgrade=true
+/usr/bin/python -BEs "${IDENTITY_SOURCE}" target "${TARGET_USER}" "${PUBLIC_KEY_FILE}" "${POLICY_FILE}" "${DEPLOYMENT_IDENTITY}" "${managed_upgrade}" "" || fail "部署包主机身份校验失败"
+if id "${TARGET_USER}" >/dev/null 2>&1; then
+  /usr/bin/python -BEs "${IDENTITY_SOURCE}" check "${TARGET_USER}" "${PUBLIC_KEY_FILE}" "${POLICY_FILE}" "${DEPLOYMENT_IDENTITY}" "${managed_upgrade}" "" || fail "现有 SSH 目录、客户端身份或批准范围不匹配"
+fi
 
 if [[ -e "${ACCOUNT_MARKER}" ]]; then
   validate_managed_account "${ACCOUNT_MARKER}" "${TARGET_USER}"
@@ -512,6 +517,7 @@ usermod --shell /bin/sh "${TARGET_USER}"
 install -d -o root -g root -m 0755 /usr/local/libexec
 install -d -o root -g root -m 0755 "${CONFIG_DIR}"
 backup_existing_files
+/usr/bin/python -BEs "${IDENTITY_SOURCE}" install "${TARGET_USER}" "${PUBLIC_KEY_FILE}" "${POLICY_FILE}" "${DEPLOYMENT_IDENTITY}" "${managed_upgrade}" "${BACKUP_DIR}" || fail "安全安装 SSH 身份失败"
 install -o root -g root -m 0755 "${WRAPPER_SOURCE}" "${WRAPPER_TARGET}"
 install -o root -g root -m 0644 "${POLICY_FILE}" "${POLICY_TARGET}"
 if [[ "${READ_MODE}" == privileged ]]; then
@@ -526,15 +532,8 @@ fi
 readonly USER_HOME="$(getent passwd "${TARGET_USER}" | cut -d: -f6)"
 readonly SSH_DIR="${USER_HOME}/.ssh"
 readonly AUTHORIZED_KEYS="${SSH_DIR}/authorized_keys"
-install -d -o "${TARGET_USER}" -g "${TARGET_USER}" -m 0700 "${SSH_DIR}"
-
-forced_command='command="/usr/bin/python /usr/local/libexec/linux-mcp-readonly.py",no-agent-forwarding,no-port-forwarding,no-X11-forwarding,no-pty'
-printf '%s %s\n' "${forced_command}" "${public_key}" > "${AUTHORIZED_KEYS}"
-chown "${TARGET_USER}:${TARGET_USER}" "${AUTHORIZED_KEYS}"
-chmod 0600 "${AUTHORIZED_KEYS}"
-
 if command -v restorecon >/dev/null 2>&1; then
-  restorecon -RF "${SSH_DIR}" >/dev/null || true
+  restorecon -h "${USER_HOME}" "${SSH_DIR}" "${AUTHORIZED_KEYS}" >/dev/null || true
 fi
 if [[ "${WRITE_ACCOUNT_MARKER}" == true ]]; then
   write_managed_account

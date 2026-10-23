@@ -192,6 +192,9 @@ class Config(BaseSettings):
 
     # Command execution timeout (applies to both local and remote commands)
     command_timeout: int = 30  # Timeout in seconds; prevents hung commands
+    max_command_output_bytes: int = Field(default=4 * 1024 * 1024, ge=1024, le=16 * 1024 * 1024)
+    max_command_stderr_bytes: int = Field(default=64 * 1024, ge=1024, le=1024 * 1024)
+    max_concurrent_commands_per_host: int = Field(default=2, ge=1, le=8)
 
     # Indicate mcp-app compatibility
     use_mcp_apps: bool | None = None

@@ -53,6 +53,8 @@ graph LR
 
 各项能力以主机的 `exact`、`partial`、`unsupported` 画像为准。例如，CentOS 6 缺少 journald 时，相关接口会明确返回不支持。版本差异见 [兼容说明](docs/centos7-compatibility.md)，权限机制见 [使用与实现说明](docs/centos-client-guide.md)。
 
+包装器版本 6 加固了升级包身份绑定与 SSH 公钥写入，增加流式输出和并发限制，并修正旧系统内存、目录占用口径。已有主机需管理员增量安装后重新验收，见 [升级与指标说明](docs/centos-client-guide.md#升级与诊断指标)。
+
 ## 使用前需要什么
 
 | 位置 | 环境要求 |

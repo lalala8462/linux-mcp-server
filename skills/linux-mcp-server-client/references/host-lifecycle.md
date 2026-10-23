@@ -66,6 +66,8 @@ cat ./INSTALL.txt
 
 实际交付时用本次完整 `install_command` 替换最后一行，不能只让管理员猜测。CentOS 6 使用 `id_rsa.pub --allow-rsa`，其他版本使用 `id_ed25519.pub`。仅核对过的旧账号缺少受管标记时增加 `--adopt-existing`。
 
+版本 6 的部署包包含 `install-ssh-identity.py` 与 `deployment.json`，安装前校验服务器主机公钥、已有客户端公钥和批准目录；错包、换钥和范围变化均拒绝。不要手动跳过校验或删掉旧身份。安装后专用 home、`.ssh` 与 `authorized_keys` 由 root 控制，防止账号自己移除强制命令；异常路径或链接由管理员核查。旧公钥连同活动资产进入 root 备份目录。
+
 ## 验收与维护
 
 管理员安装时会为每个根创建 `.linux-mcp-verify` 非敏感样本：普通文本、root:root 0600 文本/日志、0700 目录和指向根外的链接。root 模式直接运行：
@@ -104,7 +106,9 @@ linux-mcp-hosts refresh --alias server-a \
   --bundle /path/to/new-discovery.tar.gz
 ```
 
-确认后才添加 `--accept-changes`。接受后重新 prepare、管理员安装与 verify。已有包使用新目录/文件名，不手工覆盖或删除。
+确认后才添加 `--accept-changes`。接受后重新 prepare，验证并复用原密钥，保留原读取模式；仍须传入可信主机公钥。算法变更会拒绝，不能自动换钥。随后管理员安装并 verify。已有包使用新目录/文件名，不手工覆盖或删除。
+
+验收开始后旧 verified 会撤销，失败、中断或最新尝试仍在运行都不能引用历史成功作为当前通过。`last-successful-verification.json` 仅供历史核对，`verification-attempt.json` 记录最新尝试；不要导入或手工生成成功结果。版本 6 的目录大小使用实际占用字节，旧画像会标为逻辑大小；内存 available 若来自旧 free 输出估算，按返回标记说明。
 
 ## 卸载与本机退役
 

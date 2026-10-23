@@ -106,7 +106,13 @@ async def test_timeout_behavior(
     """Test timeout parameter passing and error handling."""
     mocker.patch("linux_mcp_server.connection.ssh.CONFIG.command_timeout", global_timeout)
     mocker.patch("linux_mcp_server.connection.ssh.get_remote_bin_path", return_value=("/usr/bin/cmd"))
-    mock_ssh_connection.run = mock_run_factory()
+    template = mock_run_factory()
+    bounded_run = mocker.patch(
+        "linux_mcp_server.connection.ssh.run_bounded_remote",
+        autospec=True,
+        return_value=template.return_value,
+        side_effect=template.side_effect,
+    )
 
     with expectation:
         # Only pass timeout if explicitly set (None means use default)
@@ -115,7 +121,7 @@ async def test_timeout_behavior(
             kwargs["timeout"] = per_cmd_timeout
 
         returncode, stdout, _ = await ssh_manager.execute_remote(["cmd"], "host", **kwargs)
-        call_kwargs = mock_ssh_connection.run.call_args.kwargs
+        call_kwargs = bounded_run.call_args.kwargs
 
         assert returncode == 0
         assert stdout == "ok"
@@ -124,7 +130,11 @@ async def test_timeout_behavior(
 
 async def test_timeout_error_contains_context(mocker, ssh_manager, mock_ssh_connection):
     """Test that timeout error message includes command, host, and user context."""
-    mock_ssh_connection.run = _make_timeout_mock()
+    mocker.patch(
+        "linux_mcp_server.connection.ssh.run_bounded_remote",
+        autospec=True,
+        side_effect=_make_timeout_mock().side_effect,
+    )
     mocker.patch("linux_mcp_server.connection.ssh.get_remote_bin_path", return_value=("/usr/bin/mycommand"))
 
     with pytest.raises(ConnectionError) as exc_info:

@@ -32,9 +32,9 @@ async def test_list_directories(setup_test_paths, mcp_client, tmp_path):
 @pytest.mark.skipif(sys.platform != "linux", reason="requires GNU version of coreutils/findutils")
 async def test_list_directories_by_size(setup_test_paths, mcp_client, tmp_path):
     dir_specs = [
-        ("small", 100, 1000.0),
-        ("large", 300, 3000.0),
-        ("medium", 200, 2000.0),
+        ("small", 8192, 1000.0),
+        ("large", 32768, 3000.0),
+        ("medium", 16384, 2000.0),
     ]
     setup_test_paths(dir_specs)
 
@@ -57,7 +57,7 @@ async def test_list_directories_by_size(setup_test_paths, mcp_client, tmp_path):
             id="name_descending",
         ),
         pytest.param(
-            [("small", 100, 1000.0), ("medium", 200, 2000.0), ("large", 300, 3000.0)],
+            [("small", 8192, 1000.0), ("medium", 16384, 2000.0), ("large", 32768, 3000.0)],
             OrderBy.SIZE,
             ["large", "medium", "small"],
             id="size_descending",

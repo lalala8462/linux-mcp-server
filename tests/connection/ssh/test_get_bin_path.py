@@ -14,7 +14,11 @@ def test_get_bin_path_not_found(mocker):
 async def test_get_remote_bin_path_error(mocker):
     connection = mocker.Mock(asyncssh.SSHClientConnection)
     connection.get_extra_info.return_value = "testuser"
-    connection.run = mocker.AsyncMock(side_effect=asyncssh.Error(1, "Raised intentionally"))
+    mocker.patch(
+        "linux_mcp_server.connection.ssh.run_bounded_remote",
+        autospec=True,
+        side_effect=asyncssh.Error(1, "Raised intentionally"),
+    )
 
     with pytest.raises(ConnectionError, match="Raised intentionally"):
         await get_remote_bin_path("ls", "host", connection)
@@ -23,7 +27,11 @@ async def test_get_remote_bin_path_error(mocker):
 async def test_get_remote_bin_not_found(mocker):
     connection = mocker.Mock(asyncssh.SSHClientConnection)
     connection.get_extra_info.return_value = "testuser"
-    connection.run = mocker.AsyncMock(return_value=mocker.Mock(exit_status=0, stdout="", stderr=""))
+    mocker.patch(
+        "linux_mcp_server.connection.ssh.run_bounded_remote",
+        autospec=True,
+        return_value=mocker.Mock(exit_status=0, stdout="", stderr=""),
+    )
 
     with pytest.raises(FileNotFoundError, match="Unable to find command"):
         await get_remote_bin_path("ls", "host", connection)

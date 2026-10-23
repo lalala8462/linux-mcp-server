@@ -26,17 +26,17 @@ fixed-command overlay for a dedicated `codex-ro` account.
 ## Account installation
 
 Prefer the complete `linux-mcp-hosts` deployment archive described in the
-[installation guide](windows-wsl-setup.md). It includes the public key, policy, wrapper,
-helper and installer with a file-hash manifest. Never upload the private key.
-When assembling a reviewed manual installation, include all these source assets;
-an old wrapper-only archive cannot install privileged reading.
+[client guide](centos-client-guide.md). It includes the public key, policy, wrapper,
+helper, SSH identity installer and bound deployment metadata with a file-hash
+manifest. Never upload the private key. Use the complete CLI-generated archive;
+an old wrapper-only archive or hand-copied sources lack the identity binding.
 
 For a new account, the target-server administrator runs:
 
 ```bash
 sudo bash /tmp/linux-mcp-bootstrap/install-readonly-account.sh \
   /tmp/linux-mcp-bootstrap/id_ed25519.pub \
-  /tmp/linux-mcp-bootstrap/centos-policy.local.json \
+  /tmp/linux-mcp-bootstrap/policy.json \
   codex-ro
 ```
 
@@ -47,7 +47,7 @@ rights first. Only then migrate it explicitly:
 ```bash
 sudo bash /tmp/linux-mcp-bootstrap/install-readonly-account.sh \
   /tmp/linux-mcp-bootstrap/id_ed25519.pub \
-  /tmp/linux-mcp-bootstrap/centos-policy.local.json \
+  /tmp/linux-mcp-bootstrap/policy.json \
   codex-ro \
   --adopt-existing
 ```
@@ -119,8 +119,34 @@ file contents. Privileged-mode samples and verification are described below.
 
 Use `rebuild-deployment` after wrapper or installer changes. It reuses the
 managed key, includes only the public key, writes a file-hash manifest, and
-refuses to overwrite an existing archive. Use `refresh` after OS, host-key, or
-capability drift. Do not enable an arbitrary shell or `run_script`.
+refuses to overwrite an existing archive. Wrapper version 6 bundles also include
+`install-ssh-identity.py` and `deployment.json`. The installer checks the trusted
+server host key, installed client public key and unchanged approved roots before
+mutating the managed setup. Shared host keys on cloned machines do not bypass
+the per-host client key check. A package is not a substitute for the operator's
+trusted machine identification during first enrollment.
+
+The account home, `.ssh` and `authorized_keys` become root-controlled with modes
+`0755`, `0755`, `0644`, so sshd can read the public key while the account cannot
+remove its forced command or replace the directory. Only a dedicated home named
+after the account is accepted, under trusted ancestors. Descriptor-based opens,
+exclusive temporary files and atomic replacement reject symlink/hardlink attacks;
+the original key file is backed up with the active assets. Unexpected filesystem
+objects stop installation and require administrator inspection.
+
+Use `refresh` after OS, host-key, or capability drift. A subsequent `prepare`
+validates and reuses the existing key pair instead of overwriting it; key algorithm
+changes require separate reviewed migration. Each live `verify` clears the current
+verified timestamp before checking, keeps historical successful state separately,
+and records the latest attempt. Concurrent verification is rejected. Do not enable
+an arbitrary shell or `run_script`.
+
+Output is limited while receiving (default stdout 4 MiB, stderr 64 KiB), with two
+commands per SSH connection by default. Overflow discards partial results. The
+ordinary forced wrapper also has a 25-second execution alarm and nonblocking file
+opens. Directory size means allocated bytes for version 6; old profile versions
+remain explicitly marked as apparent bytes. Legacy `free` output reports an
+explicitly estimated available value and preserves the raw used-with-cache value.
 
 ## Controlled privileged reading
 

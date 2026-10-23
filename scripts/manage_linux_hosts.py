@@ -18,6 +18,8 @@ import sys
 import tarfile
 import tempfile
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -45,7 +47,8 @@ COLLECTOR = ASSET_ROOT / "collect-host-profile.py"
 INSTALLER = ASSET_ROOT / "install-readonly-account.sh"
 WRAPPER = ASSET_ROOT / "linux-mcp-readonly.py"
 PRIVILEGED_HELPER = ASSET_ROOT / "linux-mcp-privileged-read"
-WRAPPER_VERSION = "5"
+SSH_IDENTITY_INSTALLER = ASSET_ROOT / "install-ssh-identity.py"
+WRAPPER_VERSION = "6"
 ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")
 ROOT_RE = re.compile(r"^/[A-Za-z0-9._/-]+$")
 VERIFICATION_REASONS = frozenset(
@@ -370,6 +373,7 @@ def write_deployment_bundle(
     private_key: Path,
     bundle: Path,
     read_mode: Literal["user", "privileged"] = "user",
+    host_public_key: str,
 ) -> tuple[str, str]:
     """Create one deployment archive without reading or packaging the private key."""
 
@@ -387,6 +391,7 @@ def write_deployment_bundle(
         (INSTALLER, "installer"),
         (WRAPPER, "wrapper"),
         (PRIVILEGED_HELPER, "privileged helper"),
+        (SSH_IDENTITY_INSTALLER, "SSH identity installer"),
         (public_key, "client public key"),
     ):
         require_regular_asset(source, label)
@@ -409,7 +414,23 @@ def write_deployment_bundle(
             shutil.copy2(INSTALLER, stage / INSTALLER.name)
             shutil.copy2(WRAPPER, stage / WRAPPER.name)
             shutil.copy2(PRIVILEGED_HELPER, stage / PRIVILEGED_HELPER.name)
+            shutil.copy2(SSH_IDENTITY_INSTALLER, stage / SSH_IDENTITY_INSTALLER.name)
             shutil.copy2(public_key, stage / public_key.name)
+            (stage / "deployment.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "alias": alias,
+                        "host_public_key": normalize_public_key(host_public_key),
+                        "client_public_key": normalized_public_key,
+                        "allowed_roots": list(allowed_roots),
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="ascii",
+                newline="\n",
+            )
             (stage / "policy.json").write_text(
                 json.dumps(policy, ensure_ascii=True, sort_keys=True) + "\n",
                 encoding="ascii",
@@ -486,7 +507,35 @@ def command_prepare(args: argparse.Namespace) -> None:
     trusted_key = normalize_public_key(args.trusted_host_key_file.read_text(encoding="ascii"))
     host_key_type, host_fingerprint = select_host_key(discovery, trusted_key, major)
     host_dir = registry_dir(args, alias)
-    client_key_type, private_key = generate_client_key(host_dir, major)
+    previous_path = host_dir / "profile.json"
+    if not previous_path.exists():
+        previous_path = host_dir / "profile.stale.json"
+    previous = HostProfile.model_validate(read_json(previous_path)) if previous_path.exists() else None
+    if previous is None:
+        client_key_type, private_key = generate_client_key(host_dir, major)
+    else:
+        client_key_type = "rsa" if major == 6 else "ed25519"
+        private_key = host_dir / ("id_rsa" if major == 6 else "id_ed25519")
+        if (
+            previous.alias != alias
+            or previous.address != registration["address"]
+            or previous.port != registration["port"]
+            or previous.allowed_roots != tuple(registration["allowed_roots"])
+            or previous.ssh.client_key_type != client_key_type
+            or previous.ssh.private_key_path != private_key.resolve()
+        ):
+            raise RuntimeError("Refresh cannot silently replace identity, scope or client key algorithm")
+        require_regular_asset(private_key, "existing client private key")
+        require_regular_asset(Path(str(private_key) + ".pub"), "existing client public key")
+        if private_key.stat().st_mode & 0o077:
+            raise RuntimeError("Existing client private key permissions are too broad")
+        derived = subprocess.run(
+            ["ssh-keygen", "-y", "-P", "", "-f", str(private_key)], check=True, capture_output=True, text=True
+        )
+        if normalize_public_key(derived.stdout) != normalize_public_key(
+            Path(str(private_key) + ".pub").read_text(encoding="ascii")
+        ):
+            raise RuntimeError("Existing client key pair does not match")
     known_hosts = host_dir / "known_hosts"
     known_host_name = (
         registration["address"] if registration["port"] == 22 else f"[{registration['address']}]:{registration['port']}"
@@ -499,7 +548,7 @@ def command_prepare(args: argparse.Namespace) -> None:
         address=registration["address"],
         port=registration["port"],
         allowed_roots=registration["allowed_roots"],
-        read_mode=getattr(args, "read_mode", "user"),
+        read_mode=getattr(args, "read_mode", None) or (previous.read_mode if previous else "user"),
         os=discovery["os"],
         ssh=SSHProfile(
             server_version=discovery["ssh"]["server_version"],
@@ -517,8 +566,6 @@ def command_prepare(args: argparse.Namespace) -> None:
         wrapper_version=WRAPPER_VERSION,
         discovered_at=discovery["collected_at"],
     )
-    atomic_json(host_dir / "profile.json", profile.model_dump(mode="json"))
-
     digest, install_command = write_deployment_bundle(
         alias=alias,
         allowed_roots=tuple(registration["allowed_roots"]),
@@ -526,7 +573,9 @@ def command_prepare(args: argparse.Namespace) -> None:
         private_key=private_key,
         bundle=bundle,
         read_mode=profile.read_mode,
+        host_public_key=profile.ssh.host_public_key,
     )
+    atomic_json(host_dir / "profile.json", profile.model_dump(mode="json"))
     print_deployment_result(bundle, digest, host_fingerprint, install_command)
 
 
@@ -551,6 +600,7 @@ def command_rebuild_deployment(args: argparse.Namespace) -> None:
         private_key=private_key,
         bundle=bundle,
         read_mode=read_mode,
+        host_public_key=profile.ssh.host_public_key,
     )
     updated_payload = profile.model_dump(mode="json")
     updated_payload["mcp_version"] = __version__
@@ -614,9 +664,26 @@ def command_show(args: argparse.Namespace) -> None:
     print(profile_matrix(discovery["capabilities"]))
 
 
+@contextmanager
+def verification_lock(host_dir: Path) -> Iterator[None]:
+    import fcntl
+
+    descriptor = os.open(host_dir / ".verification.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+    finally:
+        os.close(descriptor)
+
+
 def command_verify(args: argparse.Namespace) -> None:
     alias = validate_alias(args.alias)
     host_dir = registry_dir(args, alias)
+    with verification_lock(host_dir):
+        verify_locked(args, host_dir, alias)
+
+
+def verify_locked(args: argparse.Namespace, host_dir: Path, alias: str) -> None:
     profile = HostProfile.model_validate(read_json(host_dir / "profile.json"))
     if profile.read_mode == "privileged":
         if args.results_json is not None:
@@ -626,21 +693,48 @@ def command_verify(args: argparse.Namespace) -> None:
         if args.sample_log_file is None:
             args.sample_log_file = Path(profile.allowed_roots[0]) / ".linux-mcp-verify/private/app.log"
     if args.results_json is not None:
+        profile = invalidate_verification(profile, host_dir)
         results = read_json(args.results_json)
     else:
         if not args.sample_file or args.sample_log_file is None:
             raise RuntimeError("live verification requires --sample-file for every root and --sample-log-file")
         validate_verification_paths(profile, args.sample_file, args.sample_log_file)
-        results = asyncio.run(run_mcp_verification(args, profile))
+        profile = invalidate_verification(profile, host_dir)
+        try:
+            results = asyncio.run(run_mcp_verification(args, profile))
+        except BaseException:
+            atomic_json(host_dir / "verification-attempt.json", {"status": "failed", "alias": alias})
+            raise
         atomic_json(host_dir / "verification.json", results)
         print(f"verification_results={host_dir / 'verification.json'}")
-    accept_verification_results(profile, results)
+    try:
+        accept_verification_results(profile, results)
+    except Exception:
+        atomic_json(host_dir / "verification-attempt.json", {"status": "failed", "alias": alias})
+        raise
     updated_payload = profile.model_dump(mode="json")
     updated_payload["verified_at"] = results["completed_at"]
     updated = HostProfile.model_validate(updated_payload)
     atomic_json(host_dir / "profile.json", updated.model_dump(mode="json"))
+    atomic_json(
+        host_dir / "verification-attempt.json",
+        {"status": "success", "alias": alias, "completed_at": results["completed_at"]},
+    )
     print(f"verified={alias}")
     print(f"verified_at={updated.verified_at}")
+
+
+def invalidate_verification(profile: HostProfile, host_dir: Path) -> HostProfile:
+    # 新验收开始即撤销当前成功状态；旧成功记录只作历史证据。
+    if profile.verified_at is not None:
+        atomic_json(host_dir / "last-successful-verification.json", profile.model_dump(mode="json"))
+    profile = profile.model_copy(update={"verified_at": None})
+    atomic_json(host_dir / "profile.json", profile.model_dump(mode="json"))
+    atomic_json(
+        host_dir / "verification-attempt.json",
+        {"status": "running", "alias": profile.alias, "started_at": datetime.now(timezone.utc).isoformat()},
+    )
+    return profile
 
 
 def accept_verification_results(profile: HostProfile, results: dict[str, Any]) -> None:
@@ -945,7 +1039,7 @@ def parser() -> argparse.ArgumentParser:
     prepare.add_argument("--output-dir", type=Path, required=True)
     prepare.add_argument("--accept-incomplete", action="store_true")
     prepare.add_argument("--allow-rsa", action="store_true")
-    prepare.add_argument("--read-mode", choices=("user", "privileged"), default="user")
+    prepare.add_argument("--read-mode", choices=("user", "privileged"))
     prepare.set_defaults(handler=command_prepare)
 
     rebuild = subcommands.add_parser("rebuild-deployment")

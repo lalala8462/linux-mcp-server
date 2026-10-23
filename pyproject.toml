@@ -211,6 +211,7 @@ order-by-type = false
 "scripts/centos/install-readonly-account.sh" = "linux_mcp_server/managed_assets/centos/install-readonly-account.sh"
 "scripts/centos/linux-mcp-readonly.py" = "linux_mcp_server/managed_assets/centos/linux-mcp-readonly.py"
 "scripts/centos/linux-mcp-privileged-read" = "linux_mcp_server/managed_assets/centos/linux-mcp-privileged-read"
+"scripts/centos/install-ssh-identity.py" = "linux_mcp_server/managed_assets/centos/install-ssh-identity.py"
 
 # Force hatch to pick up the bundled app that is git-ignored
 [tool.hatch.build]

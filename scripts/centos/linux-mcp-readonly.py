@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import stat
 import subprocess
 import sys
@@ -222,7 +223,7 @@ def _open_verified_path(path, roots, expected_kind, exact_path=None):
     if not os.path.isdir(PROC_SELF_FD):
         raise PolicyError("系统不支持 /proc/self/fd，拒绝路径命令")
 
-    flags = os.O_RDONLY | os.O_NOFOLLOW
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
     if expected_kind == "directory":
         if not hasattr(os, "O_DIRECTORY"):
             raise PolicyError("系统不支持 O_DIRECTORY，拒绝目录命令")
@@ -271,6 +272,7 @@ def _prepare_path_command(validated, policy):
         command[-1] = _fd_path(descriptor)
     elif name == "du":
         descriptor = _open_verified_path(command[-1], policy["allowed_roots"], "directory")
+        command[1] = "--block-size=1"
         command.insert(1, "-H")
         command[-1] = _fd_path(descriptor)
     elif name == "find":
@@ -432,7 +434,8 @@ def validate_command(original_command, policy):  # noqa: C901
         raise PolicyError("ps 参数不在白名单")
 
     if name == "du":
-        if len(args) != 4 or tuple(args[:3]) != ("-b", "--one-file-system", "--max-depth=1"):
+        if (len(args) != 4 or args[0] not in ("-b", "--block-size=1")
+                or tuple(args[1:3]) != ("--one-file-system", "--max-depth=1")):
             raise PolicyError("du 参数不在白名单")
         args[3] = _scan_path(args[3], policy)
         return [name] + args
@@ -577,4 +580,6 @@ def main():
 
 
 if __name__ == "__main__":
+    # 超时随 exec 保留，普通权限的固定命令也不能无限运行。
+    signal.alarm(25)
     sys.exit(main())

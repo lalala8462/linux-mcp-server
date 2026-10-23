@@ -10,7 +10,6 @@ import logging
 import os
 import shlex
 import shutil
-import subprocess
 import time
 
 from collections.abc import Sequence
@@ -30,6 +29,8 @@ from linux_mcp_server.compatibility import HostCompatibility
 from linux_mcp_server.compatibility import parse_os_release
 from linux_mcp_server.compatibility import validate_variant_output
 from linux_mcp_server.config import CONFIG
+from linux_mcp_server.connection.limits import run_bounded_local
+from linux_mcp_server.connection.limits import run_bounded_remote
 from linux_mcp_server.execution_context import get_execution_context
 from linux_mcp_server.host_registry import get_managed_profile
 from linux_mcp_server.host_registry import HostProfile
@@ -300,13 +301,14 @@ class SSHConnectionManager:
         cmd_str = shlex.join([binary, *command[1:]])
         start_time = time.time()
         try:
-            result = await conn.run(
+            result = await run_bounded_remote(
+                conn,
                 cmd_str,
                 check=False,
                 timeout=CONFIG.command_timeout,
                 encoding="utf-8",
             )
-        except asyncssh.TimeoutError:
+        except (asyncssh.TimeoutError, TimeoutError):
             raise ConnectionError(f"Compatibility probe timed out on {host}") from None
         except asyncssh.Error as error:
             raise ConnectionError(f"Compatibility probe failed on {host}: {error}") from error
@@ -455,8 +457,8 @@ class SSHConnectionManager:
 
         try:
             try:
-                result = await conn.run(cmd_str, check=False, timeout=timeout, encoding=encoding)
-            except asyncssh.TimeoutError:
+                result = await run_bounded_remote(conn, cmd_str, check=False, timeout=timeout, encoding=encoding)
+            except (asyncssh.TimeoutError, TimeoutError):
                 duration = time.time() - start_time
                 logger.error(
                     f"Command timed out after {timeout}s",
@@ -549,7 +551,7 @@ async def get_remote_bin_path(
     """
     logger.debug(f"Getting path for {command} on {hostname}")
     try:
-        result = await connection.run(shlex.join(["command", "-v", command]), timeout=timeout)
+        result = await run_bounded_remote(connection, shlex.join(["command", "-v", command]), timeout=timeout)
     except asyncssh.Error as err:
         raise ConnectionError(
             f"Error when trying to locate command '{command}' on {connection.get_extra_info('username')}@{hostname}: {err}"
@@ -726,18 +728,9 @@ async def _execute_local(
     timeout = CONFIG.command_timeout
 
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *full_command,
-            start_new_session=True,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
         try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            return_code, stdout_bytes, stderr_bytes = await run_bounded_local(full_command, timeout)
         except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
             duration = time.time() - start_time
             logger.error(
                 f"Command timed out after {timeout}s",
@@ -750,7 +743,6 @@ async def _execute_local(
             )
             raise TimeoutError(f"Command timed out after {timeout}s on localhost: {cmd_str}") from None
 
-        return_code = proc.returncode if proc.returncode is not None else 0
         stdout = stdout_bytes if encoding is None else stdout_bytes.decode(encoding, errors="replace")
         stderr = stderr_bytes if encoding is None else stderr_bytes.decode(encoding, errors="replace")
 

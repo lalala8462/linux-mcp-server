@@ -192,18 +192,33 @@ def parse_free_output(stdout: str) -> SystemMemory:
     swap = None
 
     lines = stdout.strip().split("\n")
+    headers: list[str] = []
     for line in lines:
+        line = line.strip()
+        if line.startswith("total"):
+            headers = line.split()
         if line.startswith("Mem:"):
             parts = line.split()
             if len(parts) >= 4:
+                columns = (
+                    headers or ["total", "used", "free", "shared", "buffers", "cached", "available"][: len(parts) - 1]
+                )
+                values = dict(zip(columns, (int(value) for value in parts[1:]), strict=True))
+                total, raw_used, free = values["total"], values["used"], values["free"]
+                buffers = values.get("buffers", 0)
+                cache = values.get("cache", values.get("cached", values.get("buff/cache", 0)))
+                estimated = "available" not in values
+                available = min(total, free + buffers + cache) if estimated else values["available"]
                 ram = MemoryInfo(
-                    total=int(parts[1]),
-                    used=int(parts[2]),
-                    free=int(parts[3]),
-                    shared=int(parts[4]) if len(parts) > 4 else 0,
-                    buffers=int(parts[5]) if len(parts) > 5 else 0,
-                    cached=int(parts[6]) if len(parts) > 6 else 0,
-                    available=int(parts[7]) if len(parts) > 7 else int(parts[3]),
+                    total=total,
+                    used=max(0, raw_used - buffers - cache) if estimated else raw_used,
+                    free=free,
+                    shared=values.get("shared", 0),
+                    buffers=buffers,
+                    cached=cache,
+                    available=available,
+                    available_is_estimate=estimated,
+                    used_including_cache=raw_used if estimated else None,
                 )
         elif line.startswith("Swap:"):
             parts = line.split()

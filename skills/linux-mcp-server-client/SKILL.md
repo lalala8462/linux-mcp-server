@@ -37,6 +37,7 @@ wsl.exe -d <发行版> -- /home/<wsl-user>/.local/bin/linux-mcp-hosts list
 - 每次交付探测、部署、卸载包，给出 WSL 绝对路径、对应 Windows 路径、SHA256 和完整管理员命令；部署时使用 CLI 输出的 `install_command`，不要硬编码公钥文件名。WSL 原生路径映射为 `\\wsl$\<发行版>\...`，`/mnt/<盘符>/...` 映射为对应 Windows 盘符。
 - 普通模式权限不足时说明真实原因；需要稳定读取 root 文件时优先按已确认的 helper 方案增量升级，ACL 作为普通权限管理手段。helper 模式失败时核对模式、专用 sudoers、root 所有的 helper/策略和实际解释器，不回退为成功、空日志或 unsupported。
 - helper 升级复用账号、密钥、身份和根目录；通过 `rebuild-deployment --read-mode privileged` 出包，管理员一次安装后用真实 MCP 验收。安装样本覆盖每个根内普通文本、root 专属文件/日志/目录以及越界拒绝；未通过不得标记 verified，也不导入人工构造的成功结果。
+- 升级包校验服务器和客户端公钥、现有批准范围；安装器拒绝错包或异常 SSH 路径。专用 home 与 SSH 身份文件由 root 控制，不把权限改回账号可写。验收失败或中断后不能沿用历史 verified；指标按返回的 available 估算标记与目录大小口径解释。
 - 生产信息、画像、密钥、公钥身份材料、known_hosts、日志与部署包留在本机；公开文档只使用虚构别名、标准示例 IP 和通用目录。
 
 ## 故障处理

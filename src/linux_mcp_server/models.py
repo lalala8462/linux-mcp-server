@@ -87,6 +87,8 @@ class MemoryInfo(BaseModel):
     buffers: int = 0
     cached: int = 0
     available: int = 0
+    available_is_estimate: bool = False
+    used_including_cache: int | None = None
 
 
 class SwapInfo(BaseModel):
@@ -186,6 +188,7 @@ class NodeEntry(BaseModel):
 class StorageNodes(BaseModel):
     nodes: list[NodeEntry]
     total: int = Field(default_factory=field_length("nodes"))
+    size_basis: str | None = None
 
 
 ### Log models ###

@@ -99,7 +99,9 @@ async def test_probe_compatibility_fails_closed_on_malformed_output(mocker):
 async def test_probe_timeout_is_not_treated_as_incompatibility(mocker):
     manager = SSHConnectionManager()
     connection = mocker.Mock()
-    connection.run = mocker.AsyncMock(
+    mocker.patch(
+        "linux_mcp_server.connection.ssh.run_bounded_remote",
+        autospec=True,
         side_effect=asyncssh.TimeoutError(
             env=None,
             command="hostname",
@@ -109,7 +111,7 @@ async def test_probe_timeout_is_not_treated_as_incompatibility(mocker):
             returncode=None,
             stdout="",
             stderr="",
-        )
+        ),
     )
     mocker.patch(
         "linux_mcp_server.connection.ssh.get_remote_bin_path",
@@ -124,7 +126,11 @@ async def test_probe_timeout_is_not_treated_as_incompatibility(mocker):
 async def test_probe_connection_error_is_not_treated_as_incompatibility(mocker):
     manager = SSHConnectionManager()
     connection = mocker.Mock()
-    connection.run = mocker.AsyncMock(side_effect=asyncssh.Error(1, "connection lost"))
+    mocker.patch(
+        "linux_mcp_server.connection.ssh.run_bounded_remote",
+        autospec=True,
+        side_effect=asyncssh.Error(1, "connection lost"),
+    )
     mocker.patch(
         "linux_mcp_server.connection.ssh.get_remote_bin_path",
         autospec=True,
