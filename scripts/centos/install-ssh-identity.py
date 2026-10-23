@@ -43,12 +43,17 @@ def check_target(metadata, key, policy, host_key_files=None):
     if sorted(metadata["allowed_roots"]) != roots(policy):
         raise ValueError("deployment roots mismatch")
     expected = public_key(metadata["host_public_key"])
+    expected_type = expected.split()[0].encode("ascii")
     for path in host_key_files if host_key_files is not None else glob.glob("/etc/ssh/ssh_host_*_key.pub"):
         info = os.lstat(path)
         if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
             raise ValueError("unsafe server host key file")
         with open(path, "rb") as stream:
-            if public_key(stream.read().decode("ascii")) == expected:
+            candidate = stream.read()
+            # 服务器可同时保留多种主机公钥，只解析本包绑定的类型。
+            if candidate.split(None, 1)[:1] != [expected_type]:
+                continue
+            if public_key(candidate.decode("ascii")) == expected:
                 return
     raise ValueError("deployment belongs to a different SSH host identity")
 

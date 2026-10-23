@@ -110,6 +110,50 @@ def test_deployment_rejects_wrong_host_identity():
         IDENTITY.check_target(metadata, ED25519_PUBLIC_KEY, {"allowed_roots": ["/data"]}, [])
 
 
+@pytest.mark.parametrize(
+    "other_key", [b"ecdsa-sha2-nistp256 AAAA example\n", b"ssh-dss AAAA example\n", b"ssh-rsa AAAA example\n"]
+)
+def test_deployment_ignores_other_host_key_types_before_trusted_key(tmp_path, mocker, other_key):
+    other = tmp_path / "ssh_host_other_key.pub"
+    trusted = tmp_path / "ssh_host_ed25519_key.pub"
+    other.write_bytes(other_key)
+    trusted.write_text(ED25519_PUBLIC_KEY + "\n", encoding="ascii")
+    metadata = {
+        "schema_version": 1,
+        "alias": "server-1",
+        "host_public_key": ED25519_PUBLIC_KEY,
+        "client_public_key": ED25519_PUBLIC_KEY,
+        "allowed_roots": ["/data"],
+    }
+    original = IDENTITY.os.lstat
+
+    def root_owned(path, *args, **kwargs):
+        info = original(path, *args, **kwargs)
+        if Path(path) in (other, trusted):
+            return SimpleNamespace(st_mode=info.st_mode, st_uid=0)
+        return info
+
+    mocker.patch.object(IDENTITY.os, "lstat", autospec=True, side_effect=root_owned)
+    IDENTITY.check_target(metadata, ED25519_PUBLIC_KEY, {"allowed_roots": ["/data"]}, [str(other), str(trusted)])
+    with pytest.raises(ValueError, match="different SSH host"):
+        IDENTITY.check_target(metadata, ED25519_PUBLIC_KEY, {"allowed_roots": ["/data"]}, [str(other)])
+
+
+def test_deployment_still_rejects_wrong_key_of_selected_type(tmp_path, mocker):
+    candidate = tmp_path / "ssh_host_ed25519_key.pub"
+    candidate.write_text("ssh-ed25519 AAAAother\n", encoding="ascii")
+    metadata = {
+        "schema_version": 1,
+        "alias": "server-1",
+        "host_public_key": ED25519_PUBLIC_KEY,
+        "client_public_key": ED25519_PUBLIC_KEY,
+        "allowed_roots": ["/data"],
+    }
+    mocker.patch.object(IDENTITY.os, "lstat", autospec=True, return_value=SimpleNamespace(st_mode=0o100644, st_uid=0))
+    with pytest.raises(ValueError, match="different SSH host"):
+        IDENTITY.check_target(metadata, ED25519_PUBLIC_KEY, {"allowed_roots": ["/data"]}, [str(candidate)])
+
+
 def test_user_wrapper_fifo_race_cannot_block(tmp_path):
     fifo = tmp_path / "fifo"
     os.mkfifo(fifo)
