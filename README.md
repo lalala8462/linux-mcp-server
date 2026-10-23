@@ -6,6 +6,8 @@
 
 **开始使用：[安装、配置与验证](docs/windows-wsl-setup.md)** · [使用与实现说明](docs/centos-client-guide.md) · [更新记录](CHANGELOG.md)
 
+**交给 AI 安装：[Agent 安装指南](docs/agent-setup.md)**，包含环境补齐、客户端安装、管理员交接与验收。
+
 ## 实现方案
 
 ```mermaid

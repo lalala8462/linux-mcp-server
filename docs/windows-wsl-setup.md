@@ -4,6 +4,8 @@
 
 本指南用于首次安装、升级客户端或搭建开发环境，包含完整命令与配置说明。仅查看项目用途和环境要求时，先读首页。
 
+由 AI Agent 从零安装、WSL 或依赖尚未准备好时，先按 [Agent 安装指南](agent-setup.md) 检测并补齐环境，再执行本文命令。
+
 ## 1. 准备环境并克隆本 fork
 
 控制端需要 Windows Codex、WSL（下文以 Ubuntu 为例），以及 WSL 内的 `git`、`uv`、OpenSSH 客户端、Node.js 22.12+ 与 npm。MCP 包要求 Python >=3.10，本安装脚本选择 Python 3.11 独立工具环境。`uv` 安装方式见 [Astral 官方文档](https://docs.astral.sh/uv/getting-started/installation/)。远端需要 SSH 服务、Bash，以及安装器调用的 `/usr/bin/python`（兼容 Python 2.6/3.x）；管理员须能执行安装步骤。
@@ -63,10 +65,10 @@ bootstrap 安装 `linux-mcp-server`、`linux-mcp-hosts`，将模板中的 WSL ho
 
 模板中单主机密钥路径与通用目录是兼容占位；受管调用采用每台主机画像中的身份和根目录，不能将模板占位当作已登记服务器。手工配置时须保持上述边界，字段定义见 [OpenAI MCP 文档](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)。
 
-新开 Codex 会话，检查：
+新开 Codex 会话后检查。本机有 Codex CLI 时列出 MCP 配置；仅使用桌面客户端时在其 MCP 设置中确认连接：
 
 ```powershell
-codex mcp list
+if (Get-Command codex -ErrorAction SilentlyContinue) { codex mcp list }
 wsl.exe -d $Distro -- "$WslHome/.local/bin/linux-mcp-hosts" --help
 wsl.exe -d $Distro -- "$WslHome/.local/bin/linux-mcp-hosts" list
 ```
@@ -87,6 +89,8 @@ wsl.exe -d $Distro -- "$WslHome/.local/bin/linux-mcp-hosts" list
 在日常会话中先列出注册表并选择别名，再将该别名作为每次 MCP 调用的 `host`。可请求“检查 server-a 的内存、磁盘与监听端口”或“读取 server-a 批准目录下应用日志的最近 100 行”。示例别名不是实际主机。
 
 ## 开发与验证
+
+本节仅用于修改项目源码的开发者，普通使用者安装可跳过。安装是否成功以本机工具可用、客户端实际加载，以及目标服务器的真实验收为准。
 
 ```sh
 uv sync --locked

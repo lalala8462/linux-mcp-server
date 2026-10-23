@@ -2,6 +2,10 @@
 
 Read-only MCP server for Linux system diagnostics.
 
+## Installing this fork for a user
+
+For installation or deployment requests, follow `docs/agent-setup.md` first. It covers environment checks, local setup, administrator handoff, and live acceptance. Local-only installation does not require server details or developer checks. Run the checks below when modifying this repository; do not use them as the end-user installation success criterion.
+
 ## Commands
 
 ```bash
