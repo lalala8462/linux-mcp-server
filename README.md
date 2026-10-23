@@ -53,7 +53,20 @@ graph LR
 
 各项能力以主机的 `exact`、`partial`、`unsupported` 画像为准。例如，CentOS 6 缺少 journald 时，相关接口会明确返回不支持。版本差异见 [兼容说明](docs/centos7-compatibility.md)，权限机制见 [使用与实现说明](docs/centos-client-guide.md)。
 
-包装器版本 6 加固了升级包身份绑定与 SSH 公钥写入，增加流式输出和并发限制，并修正旧系统内存、目录占用口径。已有主机需管理员增量安装后重新验收，见 [升级与指标说明](docs/centos-client-guide.md#升级与诊断指标)。
+## 当前实现与已有部署升级
+
+包装器版本 6 已包含以下加固与兼容调整，操作范围仍为固定只读诊断：
+
+- **安装与身份**：升级包核对主机公钥、原客户端公钥及批准目录；安全写入并备份公钥，专用 home、`.ssh` 和 `authorized_keys` 由 root 管理，防止账号移除强制命令。异常链接、错包或范围变化会阻止安装。
+- **主机生命周期**：`refresh` 后重新 `prepare` 校验并复用原密钥；实际 `verify` 开始前撤销旧成功状态，保留历史记录并拒绝并发验收，失败或中断不能沿用旧 `verified`。
+- **读取预算**：本机和 SSH 在接收时限制输出，默认 stdout 4 MiB、stderr 64 KiB，同一 SSH 连接最多并发两个命令；普通包装器另有 25 秒时限，非阻塞打开后检查文件类型，避免 FIFO 替换阻塞。
+- **指标口径**：旧版 `free` 的 available 明确标为估算；目录大小使用实际磁盘占用并返回 `size_basis`，旧包装器画像继续明确标为逻辑大小。
+
+安装器已修复多类型主机公钥共存时的 `invalid public key` 误报：跳过与本次绑定类型不同的候选，仍须匹配登记的完整公钥。这不会开放 ECDSA/DSA 作为受管身份，也不需要删除服务器已有主机公钥。
+
+已有部署按 **更新本机 MCP 与 Skill → 逐主机 `rebuild-deployment` → 管理员安装 → 真实 MCP `verify`** 升级，复用账号、密钥和批准目录。只复制 Skill 或只更新本机 MCP 不会更新远端入口。已经完成版本 6 安装及真实验收的主机，无需仅为上述安装器解析补丁重复安装。具体命令见 [主机生命周期](skills/linux-mcp-server-client/references/host-lifecycle.md)，权限和返回字段见 [升级与指标说明](docs/centos-client-guide.md#升级与诊断指标)。
+
+本轮已在 CentOS 6/7 环境完成真实 MCP 验收，覆盖 19 项能力与画像匹配、批准根内样本的 root 文件/日志/目录读取，以及越界和符号链接拒绝。`partial`、`unsupported` 按实际能力保留；其他部署仍需各自执行验收，不能仅凭安装成功标记 `verified`。
 
 ## 使用前需要什么
 
