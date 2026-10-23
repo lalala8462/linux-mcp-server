@@ -2,9 +2,9 @@
 
 仅在首次安装、工具缺失或用户要求升级时读取。发行版、用户名和源码路径均取自当前机器，不复制他人的个人配置。
 
-源码为 [lalala8462/linux-mcp-server](https://github.com/lalala8462/linux-mcp-server)，分支 `codex/centos7-compat-1.5.0`；完整前置安装步骤见 [本 fork README](https://github.com/lalala8462/linux-mcp-server/blob/codex/centos7-compat-1.5.0/README.md)。先查找用户已指定的克隆目录；缺少源码时按该入口安装，不从上游 PyPI 包推断已具备本 fork 能力。
+源码为 [lalala8462/linux-mcp-server](https://github.com/lalala8462/linux-mcp-server)，分支 `codex/centos7-compat-1.5.0`；完整前置安装步骤见 [安装指南](https://github.com/lalala8462/linux-mcp-server/blob/codex/centos7-compat-1.5.0/docs/windows-wsl-setup.md)。先查找用户已指定的克隆目录；缺少源码时按该入口安装，不从上游 PyPI 包推断已具备本 fork 能力。
 
-Windows 运行 Codex，WSL 运行 MCP。WSL 需要 `git`、`uv`、OpenSSH 客户端及用于源码构建的 Node.js/npm；bootstrap 使用 `uv` 安装 Python 3.11 独立工具环境，远端 Python 不受此要求影响。先按 README 在 `mcp-app` 执行 `npm ci` 与 `npm run build:prod`；当前打包配置强制包含构建产物，即使 fixed 模式也须完成此步。bootstrap 不下载或执行任意远端脚本，缺少产物时停止。
+Windows 运行 Codex，WSL 运行 MCP。WSL 需要 `git`、`uv`、OpenSSH 客户端及用于源码构建的 Node.js/npm；bootstrap 使用 `uv` 安装 Python 3.11 独立工具环境，远端 Python 不受此要求影响。先按安装指南在 `mcp-app` 执行 `npm ci` 与 `npm run build:prod`；当前打包配置强制包含构建产物，即使 fixed 模式也须完成此步。bootstrap 不下载或执行任意远端脚本，缺少产物时停止。
 
 仓库克隆到 WSL 原生文件系统，如 `~/src/linux-mcp-server`。必须显式传入路径：
 

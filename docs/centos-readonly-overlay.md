@@ -26,7 +26,7 @@ fixed-command overlay for a dedicated `codex-ro` account.
 ## Account installation
 
 Prefer the complete `linux-mcp-hosts` deployment archive described in the
-[main README](../README.md). It includes the public key, policy, wrapper,
+[installation guide](windows-wsl-setup.md). It includes the public key, policy, wrapper,
 helper and installer with a file-hash manifest. Never upload the private key.
 When assembling a reviewed manual installation, include all these source assets;
 an old wrapper-only archive cannot install privileged reading.

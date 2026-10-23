@@ -1,6 +1,6 @@
 # CentOS 兼容说明
 
-Windows/WSL 架构、19 项工具、安装步骤、安全边界与优缺点已统一到 [README](../README.md)。本文仅保留版本兼容差异，避免重复维护总览与安装说明。
+项目总览见 [README](../README.md)，安装步骤见 [安装指南](windows-wsl-setup.md)，权限与方案取舍见 [使用与实现说明](centos-client-guide.md)。本文只列系统版本差异。
 
 | 系统 | 命令兼容方式 | 需要接受的限制 |
 | --- | --- | --- |
